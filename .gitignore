@@ -1,4 +1,5 @@
 .env
 brain.db
+brain.db.enc
 __pycache__/
 *.pyc
