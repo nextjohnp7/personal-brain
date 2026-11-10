@@ -732,3 +732,299 @@ def query_knowledge_graph(conn, query, limit=10):
         "entities": result_entities,
         "relations": unique_relations[:limit],
     }
+
+
+# =====================================================================
+# Edit / Delete Operations (Koreksi dan Penarikan Fakta)
+# =====================================================================
+
+def update_contact(conn, contact_id, name=None, email=None, phone=None,
+                   company=None, role=None, context_notes=None, source=None):
+    """Update an existing contact. Only provided fields are changed."""
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM contacts WHERE id = ?", (contact_id,))
+    if not cur.fetchone():
+        return None
+    now = datetime.utcnow().isoformat()
+    fields = []
+    values = []
+    if name is not None:
+        fields.append("name = ?"); values.append(name)
+    if email is not None:
+        fields.append("email = ?"); values.append(email)
+    if phone is not None:
+        fields.append("phone = ?"); values.append(phone)
+    if company is not None:
+        fields.append("company = ?"); values.append(company)
+    if role is not None:
+        fields.append("role = ?"); values.append(role)
+    if context_notes is not None:
+        fields.append("context_notes = ?"); values.append(context_notes)
+    if source is not None:
+        fields.append("source = ?"); values.append(source)
+    fields.append("updated_at = ?"); values.append(now)
+    values.append(contact_id)
+    cur.execute(f"UPDATE contacts SET {', '.join(fields)} WHERE id = ?", values)
+    conn.commit()
+    return contact_id
+
+
+def delete_contact(conn, contact_id):
+    """Delete a contact and its related emails."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM emails WHERE contact_id = ?", (contact_id,))
+    cur.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_note(conn, note_id, title=None, content=None, summary=None,
+                tags=None, last_modified=None):
+    """Update an existing note."""
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM notes WHERE id = ?", (note_id,))
+    if not cur.fetchone():
+        return None
+    now = datetime.utcnow().isoformat()
+    fields = []
+    values = []
+    if title is not None:
+        fields.append("title = ?"); values.append(title)
+    if content is not None:
+        fields.append("content = ?"); values.append(content)
+    if summary is not None:
+        fields.append("summary = ?"); values.append(summary)
+    if tags is not None:
+        fields.append("tags = ?"); values.append(json.dumps(tags))
+    if last_modified is not None:
+        fields.append("last_modified = ?"); values.append(last_modified)
+    fields.append("updated_at = ?"); values.append(now)
+    values.append(note_id)
+    cur.execute(f"UPDATE notes SET {', '.join(fields)} WHERE id = ?", values)
+    conn.commit()
+    return note_id
+
+
+def delete_note(conn, note_id):
+    """Delete a note."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_knowledge_entry(conn, entry_id, entry_type=None, title=None,
+                           content=None, related_contact_ids=None, source=None):
+    """Update an existing knowledge entry."""
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM knowledge_entries WHERE id = ?", (entry_id,))
+    if not cur.fetchone():
+        return None
+    now = datetime.utcnow().isoformat()
+    fields = []
+    values = []
+    if entry_type is not None:
+        fields.append("entry_type = ?"); values.append(entry_type)
+    if title is not None:
+        fields.append("title = ?"); values.append(title)
+    if content is not None:
+        fields.append("content = ?"); values.append(content)
+    if related_contact_ids is not None:
+        fields.append("related_contact_ids = ?"); values.append(json.dumps(related_contact_ids))
+    if source is not None:
+        fields.append("source = ?"); values.append(source)
+    fields.append("updated_at = ?"); values.append(now)
+    values.append(entry_id)
+    cur.execute(f"UPDATE knowledge_entries SET {', '.join(fields)} WHERE id = ?", values)
+    conn.commit()
+    return entry_id
+
+
+def delete_knowledge_entry(conn, entry_id):
+    """Delete a knowledge entry."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM knowledge_entries WHERE id = ?", (entry_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_entity_relation(conn, relation_id):
+    """Delete a knowledge graph relation."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM entity_relations WHERE id = ?", (relation_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_entity(conn, entity_id):
+    """Delete an entity and all its relations."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM entity_relations WHERE source_entity_id = ? OR target_entity_id = ?",
+                (entity_id, entity_id))
+    cur.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# =====================================================================
+# Export / Import
+# =====================================================================
+
+def export_brain_json(conn):
+    """Export all brain data to a JSON-serializable dict."""
+    cur = conn.cursor()
+    data = {}
+
+    def fetch_all(table, order_by=None):
+        q = f"SELECT * FROM {table}"
+        if order_by:
+            q += f" ORDER BY {order_by}"
+        cur.execute(q)
+        return [dict(r) for r in cur.fetchall()]
+
+    data["contacts"] = fetch_all("contacts", "id")
+    data["emails"] = fetch_all("emails", "id")
+    data["calendar_events"] = fetch_all("calendar_events", "id")
+    data["tweets"] = fetch_all("tweets", "id")
+    data["notes"] = fetch_all("notes", "id")
+    data["knowledge_entries"] = fetch_all("knowledge_entries", "id")
+    data["conversations"] = fetch_all("conversations", "id")
+    data["entities"] = fetch_all("entities", "id")
+    data["entity_relations"] = fetch_all("entity_relations", "id")
+    data["embeddings"] = fetch_all("embeddings", "id")
+    data["exported_at"] = datetime.utcnow().isoformat()
+    return data
+
+
+def export_brain_markdown(conn):
+    """Export brain data as markdown text."""
+    lines = ["# Personal Brain Export", ""]
+    lines.append(f"Exported at: {datetime.utcnow().isoformat()}")
+    lines.append("")
+
+    # Contacts
+    contacts = [dict(r) for r in search_contacts(conn, "", limit=10000)]
+    if contacts:
+        lines.append("## Contacts")
+        lines.append("")
+        for c in contacts:
+            lines.append(f"### {c['name']}")
+            if c.get('email'): lines.append(f"- Email: {c['email']}")
+            if c.get('phone'): lines.append(f"- Phone: {c['phone']}")
+            if c.get('company'): lines.append(f"- Company: {c['company']}")
+            if c.get('role'): lines.append(f"- Role: {c['role']}")
+            if c.get('context_notes'): lines.append(f"- Notes: {c['context_notes']}")
+            lines.append("")
+
+    # Notes
+    notes = [dict(r) for r in search_notes(conn, "", limit=10000)]
+    if notes:
+        lines.append("## Notes")
+        lines.append("")
+        for n in notes:
+            lines.append(f"### {n.get('title', n.get('filename', '(no title)'))}")
+            if n.get('filename'): lines.append(f"- File: {n['filename']}")
+            if n.get('summary'): lines.append(f"- Summary: {n['summary']}")
+            lines.append(n.get('content', ''))
+            lines.append("")
+
+    # Knowledge
+    knowledge = [dict(r) for r in search_knowledge(conn, "", limit=10000)]
+    if knowledge:
+        lines.append("## Knowledge Entries")
+        lines.append("")
+        for k in knowledge:
+            lines.append(f"### {k.get('title', '(no title)')}")
+            lines.append(f"- Type: {k.get('entry_type', 'unknown')}")
+            lines.append(f"- Source: {k.get('source', 'unknown')}")
+            lines.append(k.get('content', ''))
+            lines.append("")
+
+    # Entity relations
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT er.*, s.name AS source_name, t.name AS target_name
+        FROM entity_relations er
+        JOIN entities s ON er.source_entity_id = s.id
+        JOIN entities t ON er.target_entity_id = t.id
+    """)
+    relations = cur.fetchall()
+    if relations:
+        lines.append("## Knowledge Graph Relations")
+        lines.append("")
+        for r in relations:
+            lines.append(f"- {r['source_name']} →{r['relation_type']}→ {r['target_name']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def import_brain_json(conn, data):
+    """Import brain data from a JSON dict. Skips duplicates."""
+    imported = {"contacts": 0, "notes": 0, "knowledge_entries": 0, "entities": 0, "entity_relations": 0}
+
+    for c in data.get("contacts", []):
+        try:
+            upsert_contact(
+                conn, name=c.get("name", ""), email=c.get("email"),
+                phone=c.get("phone"), company=c.get("company"),
+                role=c.get("role"), source=c.get("source", "import"),
+                context_notes=c.get("context_notes"),
+            )
+            imported["contacts"] += 1
+        except Exception:
+            pass
+
+    for n in data.get("notes", []):
+        try:
+            upsert_note(
+                conn, filename=n.get("filename", "imported.md"),
+                file_path=n.get("file_path", ""),
+                title=n.get("title", ""), content=n.get("content", ""),
+                summary=n.get("summary"), tags=n.get("tags"),
+                last_modified=n.get("last_modified"),
+            )
+            imported["notes"] += 1
+        except Exception:
+            pass
+
+    for k in data.get("knowledge_entries", []):
+        try:
+            insert_knowledge_entry(
+                conn, entry_type=k.get("entry_type", "import"),
+                title=k.get("title", ""), content=k.get("content", ""),
+                related_contact_ids=k.get("related_contact_ids"),
+                source=k.get("source", "import"),
+            )
+            imported["knowledge_entries"] += 1
+        except Exception:
+            pass
+
+    for e in data.get("entities", []):
+        try:
+            upsert_entity(
+                conn, name=e.get("name", ""), entity_type=e.get("entity_type", "person"),
+                source=e.get("source", "import"), context_notes=e.get("context_notes"),
+            )
+            imported["entities"] += 1
+        except Exception:
+            pass
+
+    for r in data.get("entity_relations", []):
+        try:
+            # Resolve names to IDs
+            src = search_entities(conn, r.get("source_name", ""), limit=1)
+            tgt = search_entities(conn, r.get("target_name", ""), limit=1)
+            if src and tgt:
+                add_entity_relation(
+                    conn, src[0]["id"], tgt[0]["id"],
+                    r.get("relation_type", "related"),
+                    source=r.get("source", "import"),
+                    confidence=r.get("confidence", 1.0),
+                )
+                imported["entity_relations"] += 1
+        except Exception:
+            pass
+
+    conn.commit()
+    return imported

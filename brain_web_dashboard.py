@@ -1,0 +1,838 @@
+"""Brain Web Dashboard - Flask web interface for managing the Personal Brain.
+
+Provides a GUI for:
+- Searching contacts, notes, knowledge, and semantic matches
+- Managing contacts (add, edit, delete)
+- Managing notes (add, edit, delete)
+- Viewing knowledge graph (entities and relations)
+- Exporting/importing brain data (JSON and markdown)
+- Viewing conversation history
+
+Run:
+    python brain_web_dashboard.py --port 5000
+"""
+
+import sys
+import os
+import json
+import argparse
+import logging
+from pathlib import Path
+from datetime import datetime
+
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify, session, flash
+
+from brain_db import (
+    get_connection,
+    search_contacts,
+    search_notes,
+    search_knowledge,
+    global_search,
+    semantic_search,
+    query_knowledge_graph,
+    upsert_contact,
+    update_contact,
+    delete_contact,
+    upsert_note,
+    update_note,
+    delete_note,
+    insert_knowledge_entry,
+    update_knowledge_entry,
+    delete_knowledge_entry,
+    upsert_entity,
+    add_entity_relation,
+    delete_entity_relation,
+    delete_entity,
+    export_brain_json,
+    export_brain_markdown,
+    import_brain_json,
+    search_entities,
+    get_entity_relations,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("brain-web-dashboard")
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("BRAIN_DASHBOARD_SECRET", "dev-secret-change-me")
+
+# Simple API key protection for sharing
+BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
+
+
+def require_api_key(f):
+    """Decorator to require API key if BRAIN_API_KEY is set."""
+    from functools import wraps
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if BRAIN_API_KEY:
+            provided = request.headers.get("X-API-Key", "") or request.args.get("api_key", "")
+            if not provided or provided != BRAIN_API_KEY:
+                return jsonify({"error": "Invalid or missing API key"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def get_conn():
+    return get_connection()
+
+
+# ----------------------------------------------------------------------
+# Routes
+# ----------------------------------------------------------------------
+
+@app.route("/")
+def index():
+    conn = get_conn()
+    try:
+        # Quick stats
+        contacts = search_contacts(conn, "", limit=10000)
+        notes = search_notes(conn, "", limit=10000)
+        knowledge = search_knowledge(conn, "", limit=10000)
+        entities = search_entities(conn, "", limit=10000)
+
+        stats = {
+            "contacts": len(contacts),
+            "notes": len(notes),
+            "knowledge": len(knowledge),
+            "entities": len(entities),
+        }
+        return render_template_string(DASHBOARD_HTML, stats=stats, page="dashboard")
+    finally:
+        conn.close()
+
+
+# ---- Contacts ----
+
+@app.route("/contacts")
+def list_contacts():
+    q = request.args.get("q", "")
+    conn = get_conn()
+    try:
+        contacts = [dict(r) for r in search_contacts(conn, q, limit=100)]
+        return render_template_string(CONTACTS_HTML, contacts=contacts, query=q, page="contacts")
+    finally:
+        conn.close()
+
+
+@app.route("/contacts/add", methods=["GET", "POST"])
+def add_contact():
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        email = request.form.get("email", "").strip() or None
+        phone = request.form.get("phone", "").strip() or None
+        company = request.form.get("company", "").strip() or None
+        role = request.form.get("role", "").strip() or None
+        notes = request.form.get("notes", "").strip() or None
+        if not name:
+            flash("Name is required", "error")
+            return redirect(url_for("add_contact"))
+        conn = get_conn()
+        try:
+            upsert_contact(conn, name=name, email=email, phone=phone,
+                           company=company, role=role,
+                           source="web", context_notes=notes)
+            flash("Contact added successfully", "success")
+        finally:
+            conn.close()
+        return redirect(url_for("list_contacts"))
+    return render_template_string(CONTACT_ADD_HTML, page="contacts")
+
+
+@app.route("/contacts/<int:contact_id>/edit", methods=["GET", "POST"])
+def edit_contact(contact_id):
+    conn = get_conn()
+    try:
+        from brain_db import get_contact
+        contact = get_contact(conn, contact_id)
+        if not contact:
+            flash("Contact not found", "error")
+            return redirect(url_for("list_contacts"))
+        contact = dict(contact)
+
+        if request.method == "POST":
+            update_contact(
+                conn, contact_id,
+                name=request.form.get("name", "").strip() or None,
+                email=request.form.get("email", "").strip() or None,
+                phone=request.form.get("phone", "").strip() or None,
+                company=request.form.get("company", "").strip() or None,
+                role=request.form.get("role", "").strip() or None,
+                context_notes=request.form.get("notes", "").strip() or None,
+            )
+            flash("Contact updated successfully", "success")
+            return redirect(url_for("list_contacts"))
+
+        return render_template_string(CONTACT_EDIT_HTML, contact=contact, page="contacts")
+    finally:
+        conn.close()
+
+
+@app.route("/contacts/<int:contact_id>/delete", methods=["POST"])
+def delete_contact_route(contact_id):
+    conn = get_conn()
+    try:
+        if delete_contact(conn, contact_id):
+            flash("Contact deleted successfully", "success")
+        else:
+            flash("Contact not found", "error")
+    finally:
+        conn.close()
+    return redirect(url_for("list_contacts"))
+
+
+# ---- Notes ----
+
+@app.route("/notes")
+def list_notes():
+    q = request.args.get("q", "")
+    conn = get_conn()
+    try:
+        notes = [dict(r) for r in search_notes(conn, q, limit=100)]
+        return render_template_string(NOTES_HTML, notes=notes, query=q, page="notes")
+    finally:
+        conn.close()
+
+
+@app.route("/notes/add", methods=["GET", "POST"])
+def add_note():
+    if request.method == "POST":
+        title = request.form.get("title", "").strip()
+        content = request.form.get("content", "").strip()
+        tags = request.form.get("tags", "").strip()
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+        conn = get_conn()
+        try:
+            upsert_note(
+                conn, filename=request.form.get("filename", "web-note.md"),
+                file_path="web",
+                title=title or "(no title)",
+                content=content,
+                tags=tag_list,
+            )
+            flash("Note added successfully", "success")
+        finally:
+            conn.close()
+        return redirect(url_for("list_notes"))
+    return render_template_string(NOTE_ADD_HTML, page="notes")
+
+
+@app.route("/notes/<int:note_id>/edit", methods=["GET", "POST"])
+def edit_note(note_id):
+    conn = get_conn()
+    try:
+        from brain_db import get_contact  # noqa
+        # We need a get_note helper; fetch directly
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        row = cur.fetchone()
+        if not row:
+            flash("Note not found", "error")
+            return redirect(url_for("list_notes"))
+        note = dict(row)
+
+        if request.method == "POST":
+            update_note(
+                conn, note_id,
+                title=request.form.get("title", "").strip() or None,
+                content=request.form.get("content", "").strip() or None,
+                summary=request.form.get("summary", "").strip() or None,
+                tags=[t.strip() for t in request.form.get("tags", "").split(",") if t.strip()] or None,
+            )
+            flash("Note updated successfully", "success")
+            return redirect(url_for("list_notes"))
+
+        return render_template_string(NOTE_EDIT_HTML, note=note, page="notes")
+    finally:
+        conn.close()
+
+
+@app.route("/notes/<int:note_id>/delete", methods=["POST"])
+def delete_note_route(note_id):
+    conn = get_conn()
+    try:
+        if delete_note(conn, note_id):
+            flash("Note deleted successfully", "success")
+        else:
+            flash("Note not found", "error")
+    finally:
+        conn.close()
+    return redirect(url_for("list_notes"))
+
+
+# ---- Search ----
+
+@app.route("/search")
+def search():
+    q = request.args.get("q", "")
+    conn = get_conn()
+    try:
+        results = global_search(conn, q, limit=20) if q else None
+        semantic = semantic_search(conn, q, limit=10) if q else None
+        graph = query_knowledge_graph(conn, q, limit=10) if q else None
+        return render_template_string(SEARCH_HTML,
+                                      query=q, results=results,
+                                      semantic=semantic, graph=graph, page="search")
+    finally:
+        conn.close()
+
+
+# ---- Knowledge Graph ----
+
+@app.route("/graph")
+def graph():
+    q = request.args.get("q", "")
+    conn = get_conn()
+    try:
+        graph = query_knowledge_graph(conn, q, limit=50) if q else {
+            "entities": [dict(r) for r in search_entities(conn, "", limit=50)],
+            "relations": [],
+        }
+        # Get all relations for full graph view if no query
+        if not q:
+            conn2 = get_conn()
+            try:
+                from brain_db import get_entity_relations
+                all_rels = []
+                seen = set()
+                for e in graph["entities"]:
+                    rels = get_entity_relations(conn2, e["id"], limit=100)
+                    for r in rels:
+                        key = (r["source_entity_id"], r["target_entity_id"], r["relation_type"])
+                        if key not in seen:
+                            seen.add(key)
+                            all_rels.append(r)
+                graph["relations"] = all_rels
+            finally:
+                conn2.close()
+        return render_template_string(GRAPH_HTML, graph=graph, query=q, page="graph")
+    finally:
+        conn.close()
+
+
+# ---- Export / Import ----
+
+@app.route("/export")
+@require_api_key
+def export():
+    fmt = request.args.get("format", "json")
+    conn = get_conn()
+    try:
+        if fmt == "markdown":
+            content = export_brain_markdown(conn)
+            return content, 200, {"Content-Type": "text/markdown; charset=utf-8",
+                                  "Content-Disposition": "attachment; filename=brain-export.md"}
+        else:
+            data = export_brain_json(conn)
+            return jsonify(data)
+    finally:
+        conn.close()
+
+
+@app.route("/import", methods=["GET", "POST"])
+@require_api_key
+def import_brain():
+    if request.method == "POST":
+        if "file" not in request.files:
+            flash("No file uploaded", "error")
+            return redirect(url_for("import_brain"))
+        file = request.files["file"]
+        if file.filename == "":
+            flash("No file selected", "error")
+            return redirect(url_for("import_brain"))
+
+        try:
+            content = file.read().decode("utf-8")
+            data = json.loads(content)
+        except Exception as e:
+            flash(f"Invalid JSON: {e}", "error")
+            return redirect(url_for("import_brain"))
+
+        conn = get_conn()
+        try:
+            result = import_brain_json(conn, data)
+            flash(f"Import complete: {result['contacts']} contacts, "
+                  f"{result['notes']} notes, {result['knowledge_entries']} knowledge entries, "
+                  f"{result['entities']} entities, {result['entity_relations']} relations", "success")
+        finally:
+            conn.close()
+        return redirect(url_for("index"))
+
+    return render_template_string(IMPORT_HTML, page="import")
+
+
+# ---- Conversations ----
+
+@app.route("/conversations")
+def conversations():
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM conversations ORDER BY created_at DESC LIMIT 50")
+        rows = [dict(r) for r in cur.fetchall()]
+        return render_template_string(CONVERSATIONS_HTML, conversations=rows, page="conversations")
+    finally:
+        conn.close()
+
+
+# ---- API endpoints (for programmatic access) ----
+
+@app.route("/api/search")
+@require_api_key
+def api_search():
+    q = request.args.get("q", "")
+    conn = get_conn()
+    try:
+        results = global_search(conn, q, limit=20) if q else {}
+        return jsonify(results)
+    finally:
+        conn.close()
+
+
+# ----------------------------------------------------------------------
+# HTML Templates
+# ----------------------------------------------------------------------
+
+BASE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Personal Brain Dashboard</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f0f; color: #e0e0e0; margin: 0; padding: 0; }
+        header { background: #1a1a1a; border-bottom: 1px solid #333; padding: 1rem 2rem; }
+        header h1 { margin: 0; font-size: 1.25rem; color: #3b82f6; }
+        nav { display: flex; gap: 1.5rem; margin-top: 0.5rem; }
+        nav a { color: #888; text-decoration: none; font-size: 0.9rem; }
+        nav a:hover, nav a.active { color: #3b82f6; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+        .stats { display: flex; gap: 1rem; margin-bottom: 1.5rem; }
+        .stat-card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 1rem; flex: 1; }
+        .stat-card h3 { margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #888; }
+        .stat-card .value { font-size: 2rem; color: #3b82f6; }
+        .flash { padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
+        .flash.success { background: #064e3b; color: #d1fae5; border: 1px solid #10b981; }
+        .flash.error { background: #7f1d1d; color: #fecaca; border: 1px solid #ef4444; }
+        table { width: 100%; border-collapse: collapse; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #333; }
+        th { background: #111; color: #888; font-size: 0.85rem; }
+        tr:hover { background: #161616; }
+        .btn { background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 0.9rem; }
+        .btn:hover { background: #2563eb; }
+        .btn-danger { background: #ef4444; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
+        .form-group { margin-bottom: 1rem; }
+        .form-group label { display: block; margin-bottom: 0.25rem; color: #888; font-size: 0.9rem; }
+        .form-group input, .form-group textarea { width: 100%; background: #111; border: 1px solid #333; color: #e0e0e0; padding: 0.5rem; border-radius: 4px; }
+        .form-group textarea { min-height: 100px; }
+        .search-box { margin-bottom: 1.5rem; }
+        .search-box input[type="text"] { width: 100%; max-width: 500px; padding: 0.6rem; border: 1px solid #333; border-radius: 6px; background: #111; color: #e0e0e0; font-size: 1rem; }
+        .badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: #333; color: #888; }
+        .badge-person { background: #3b82f6; color: white; }
+        .badge-company { background: #10b981; color: white; }
+        .badge-concept { background: #8b5cf6; color: white; }
+        .relation-line { font-family: monospace; font-size: 0.85rem; }
+        .empty { text-align: center; color: #888; padding: 2rem; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🧠 Personal Brain Dashboard</h1>
+        <nav>
+            <a href="/" class="{% if page=='dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="/contacts" class="{% if page=='contacts' %}active{% endif %}">Contacts</a>
+            <a href="/notes" class="{% if page=='notes' %}active{% endif %}">Notes</a>
+            <a href="/search" class="{% if page=='search' %}active{% endif %}">Search</a>
+            <a href="/graph" class="{% if page=='graph' %}active{% endif %}">Knowledge Graph</a>
+            <a href="/conversations" class="{% if page=='conversations' %}active{% endif %}">Conversations</a>
+            <a href="/export?format=json" class="{% if page=='import' %}active{% endif %}">Export JSON</a>
+            <a href="/import" class="{% if page=='import' %}active{% endif %}">Import</a>
+        </nav>
+    </header>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>"""
+
+DASHBOARD_HTML = BASE_HTML.replace("</div>", """
+    <div class="stats">
+        <div class="stat-card"><h3>Contacts</h3><div class="value">{{ stats.contacts }}</div></div>
+        <div class="stat-card"><h3>Notes</h3><div class="value">{{ stats.notes }}</div></div>
+        <div class="stat-card"><h3>Knowledge Entries</h3><div class="value">{{ stats.knowledge }}</div></div>
+        <div class="stat-card"><h3>Graph Entities</h3><div class="value">{{ stats.entities }}</div></div>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+        <div class="stat-card">
+            <h3 style="margin-top:0">Quick Actions</h3>
+            <a href="/contacts/add" class="btn">Add Contact</a><br>
+            <a href="/notes/add" class="btn" style="margin-top:0.5rem">Add Note</a><br>
+            <a href="/search" class="btn" style="margin-top:0.5rem">Search Brain</a><br>
+            <a href="/graph" class="btn" style="margin-top:0.5rem">View Knowledge Graph</a>
+        </div>
+        <div class="stat-card">
+            <h3 style="margin-top:0">About</h3>
+            <p style="font-size:0.9rem; color:#888">
+                Personal Brain is your local, searchable knowledge base.<br>
+                All data stored in SQLite on your computer.<br>
+                No server required.<br>
+                <small>API key for sharing: set BRAIN_API_KEY env var.</small>
+            </p>
+        </div>
+    </div>
+</div>
+""")
+
+CONTACTS_HTML = BASE_HTML.replace("</div>", """
+    <div class="search-box">
+        <form method="get" action="/contacts">
+            <input type="text" name="q" value="{{ query }}" placeholder="Search contacts...">
+        </form>
+    </div>
+    <a href="/contacts/add" class="btn">+ Add Contact</a>
+    {% if contacts %}
+    <table>
+        <thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role</th><th>Source</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for c in contacts %}
+        <tr>
+            <td><strong>{{ c.name }}</strong></td>
+            <td>{{ c.email or '-' }}</td>
+            <td>{{ c.company or '-' }}</td>
+            <td>{{ c.role or '-' }}</td>
+            <td><span class="badge">{{ c.source }}</span></td>
+            <td>
+                <a href="/contacts/{{ c.id }}/edit" class="btn btn-sm">Edit</a>
+                <form method="POST" action="/contacts/{{ c.id }}/delete" style="display:inline" onsubmit="return confirm('Delete this contact?')">
+                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No contacts found. Add your first contact.</div>
+    {% endif %}
+</div>
+""")
+
+CONTACT_ADD_HTML = BASE_HTML.replace("</div>", """
+    <h2>Add Contact</h2>
+    <form method="POST">
+        <div class="form-group">
+            <label>Name *</label>
+            <input type="text" name="name" required>
+        </div>
+        <div class="form-group">
+            <label>Email</label>
+            <input type="email" name="email">
+        </div>
+        <div class="form-group">
+            <label>Phone</label>
+            <input type="text" name="phone">
+        </div>
+        <div class="form-group">
+            <label>Company</label>
+            <input type="text" name="company">
+        </div>
+        <div class="form-group">
+            <label>Role</label>
+            <input type="text" name="role">
+        </div>
+        <div class="form-group">
+            <label>Notes</label>
+            <textarea name="notes"></textarea>
+        </div>
+        <button type="submit" class="btn">Save Contact</a>
+    </form>
+</div>
+""")
+
+CONTACT_EDIT_HTML = BASE_HTML.replace("</div>", """
+    <h2>Edit Contact: {{ contact.name }}</h2>
+    <form method="POST">
+        <div class="form-group">
+            <label>Name</label>
+            <input type="text" name="name" value="{{ contact.name }}">
+        </div>
+        <div class="form-group">
+            <label>Email</label>
+            <input type="email" name="email" value="{{ contact.email or '' }}">
+        </div>
+        <div class="form-group">
+            <label>Phone</label>
+            <input type="text" name="phone" value="{{ contact.phone or '' }}">
+        </div>
+        <div class="form-group">
+            <label>Company</label>
+            <input type="text" name="company" value="{{ contact.company or '' }}">
+        </div>
+        <div class="form-group">
+            <label>Role</label>
+            <input type="text" name="role" value="{{ contact.role or '' }}">
+        </div>
+        <div class="form-group">
+            <label>Notes</label>
+            <textarea name="notes">{{ contact.context_notes or '' }}</textarea>
+        </div>
+        <button type="submit" class="btn">Save Changes</a>
+    </form>
+</div>
+""")
+
+NOTES_HTML = BASE_HTML.replace("</div>", """
+    <div class="search-box">
+        <form method="get" action="/notes">
+            <input type="text" name="q" value="{{ query }}" placeholder="Search notes...">
+        </form>
+    </div>
+    <a href="/notes/add" class="btn">+ Add Note</a>
+    {% if notes %}
+    <table>
+        <thead><tr><th>Title</th><th>File</th><th>Summary</th><th>Tags</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for n in notes %}
+        <tr>
+            <td><strong>{{ n.title or '(no title)' }}</strong></td>
+            <td>{{ n.filename or '-' }}</td>
+            <td>{{ (n.summary or '')[:80] }}{% if n.summary and n.summary|length > 80 %}...{% endif %}</td>
+            <td>{{ n.tags or '-' }}</td>
+            <td>
+                <a href="/notes/{{ n.id }}/edit" class="btn btn-sm">Edit</a>
+                <form method="POST" action="/notes/{{ n.id }}/delete" style="display:inline" onsubmit="return confirm('Delete this note?')">
+                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No notes found.</div>
+    {% endif %}
+</div>
+""")
+
+NOTE_ADD_HTML = BASE_HTML.replace("</div>", """
+    <h2>Add Note</h2>
+    <form method="POST">
+        <div class="form-group">
+            <label>Filename</label>
+            <input type="text" name="filename" value="web-note.md">
+        </div>
+        <div class="form-group">
+            <label>Title</label>
+            <input type="text" name="title">
+        </div>
+        <div class="form-group">
+            <label>Content</label>
+            <textarea name="content"></textarea>
+        </div>
+        <div class="form-group">
+            <label>Summary</label>
+            <input type="text" name="summary">
+        </div>
+        <div class="form-group">
+            <label>Tags (comma-separated)</label>
+            <input type="text" name="tags" placeholder="tag1, tag2">
+        </div>
+        <button type="submit" class="btn">Save Note</a>
+    </form>
+</div>
+""")
+
+NOTE_EDIT_HTML = BASE_HTML.replace("</div>", """
+    <h2>Edit Note: {{ note.title or '(no title)' }}</h2>
+    <form method="POST">
+        <div class="form-group">
+            <label>Filename</label>
+            <input type="text" name="filename" value="{{ note.filename }}">
+        </div>
+        <div class="form-group">
+            <label>Title</label>
+            <input type="text" name="title" value="{{ note.title or '' }}">
+        </div>
+        <div class="form-group">
+            <label>Content</label>
+            <textarea name="content">{{ note.content or '' }}</textarea>
+        </div>
+        <div class="form-group">
+            <label>Summary</label>
+            <input type="text" name="summary" value="{{ note.summary or '' }}">
+        </div>
+        <div class="form-group">
+            <label>Tags (comma-separated)</label>
+            <input type="text" name="tags" value="{{ note.tags or '' }}">
+        </div>
+        <button type="submit" class="btn">Save Changes</a>
+    </form>
+</div>
+""")
+
+SEARCH_HTML = BASE_HTML.replace("</div>", """
+    <div class="search-box">
+        <form method="get" action="/search">
+            <input type="text" name="q" value="{{ query }}" placeholder="Search brain...">
+        </form>
+    </div>
+    {% if query %}
+    <h3>Results for: "{{ query }}"</h3>
+
+    {% if results.contacts %}
+    <h4>Contacts ({{ results.contacts|length }})</h4>
+    <ul>
+    {% for c in results.contacts %}
+    <li><strong>{{ c.name }}</strong> - {{ c.email or 'no email' }} {% if c.company %}({{ c.company }}){% endif %}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if results.notes %}
+    <h4>Notes ({{ results.notes|length }})</h4>
+    <ul>
+    {% for n in results.notes %}
+    <li><strong>{{ n.title or n.filename }}</strong> - {{ (n.summary or '')[:100] }}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if results.knowledge %}
+    <h4>Knowledge ({{ results.knowledge|length }})</h4>
+    <ul>
+    {% for k in results.knowledge %}
+    <li><strong>{{ k.title }}</strong> - {{ k.content[:100] }}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if semantic %}
+    <h4>Semantic Matches ({{ semantic|length }})</h4>
+    <ul>
+    {% for s in semantic %}
+    <li>[{{ s.source_type }}] {{ s.content_chunk[:150] }} (relevance: {{ s.similarity }})</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if graph and graph.relations %}
+    <h4>Knowledge Graph Relations</h4>
+    <ul>
+    {% for r in graph.relations %}
+    <li>{{ r.source_name }} →{{ r.relation_type }}→ {{ r.target_name }}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if not results.contacts and not results.notes and not results.knowledge and not semantic and (not graph or not graph.relations) %}
+    <div class="empty">No results found.</div>
+    {% endif %}
+    {% endif %}
+</div>
+""")
+
+GRAPH_HTML = BASE_HTML.replace("</div>", """
+    <div class="search-box">
+        <form method="get" action="/graph">
+            <input type="text" name="q" value="{{ query }}" placeholder="Search knowledge graph...">
+        </form>
+    </div>
+    {% if graph.entities %}
+    <h3>Entities ({{ graph.entities|length }})</h3>
+    <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Source</th></tr></thead>
+        <tbody>
+        {% for e in graph.entities %}
+        <tr>
+            <td><strong>{{ e.name }}</strong></td>
+            <td><span class="badge badge-{{ e.entity_type }}">{{ e.entity_type }}</span></td>
+            <td>{{ e.source }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if graph.relations %}
+    <h3>Relations ({{ graph.relations|length }})</h3>
+    <table>
+        <thead><tr><th>Source</th><th>Relation</th><th>Target</th><th>Confidence</th></tr></thead>
+        <tbody>
+        {% for r in graph.relations %}
+        <tr>
+            <td><strong>{{ r.source_name }}</strong></td>
+            <td>{{ r.relation_type }}</td>
+            <td><strong>{{ r.target_name }}</strong></td>
+            <td>{{ "%.2f"|format(r.confidence) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if not graph.entities and not graph.relations %}
+    <div class="empty">No knowledge graph data found.</div>
+    {% endif %}
+</div>
+""")
+
+IMPORT_HTML = BASE_HTML.replace("</div>", """
+    <h2>Import Brain Data</h2>
+    <p>Upload a JSON file exported from another brain instance.</p>
+    <form method="POST" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>JSON File</label>
+            <input type="file" name="file" accept=".json" required>
+        </div>
+        <button type="submit" class="btn">Import</a>
+    </form>
+</div>
+""")
+
+CONVERSATIONS_HTML = BASE_HTML.replace("</div>", """
+    <h2>Conversation History</h2>
+    {% if conversations %}
+    <table>
+        <thead><tr><th>Time</th><th>User Message</th><th>Agent Response</th><th>Context Used</th></tr></thead>
+        <tbody>
+        {% for c in conversations %}
+        <tr>
+            <td>{{ c.created_at }}</td>
+            <td>{{ c.user_message[:100] }}{% if c.user_message|length > 100 %}...{% endif %}</td>
+            <td>{{ c.agent_response[:100] }}{% if c.agent_response|length > 100 %}...{% endif %}</td>
+            <td>{{ c.context_used or '[]' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No conversations yet.</div>
+    {% endif %}
+</div>
+""")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Brain Web Dashboard")
+    parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=5000, help="Port (default: 5000)")
+    parser.add_argument("--debug", action="store_true", help="Debug mode")
+    args = parser.parse_args()
+
+    logger.info(f"Starting Brain Web Dashboard at http://{args.host}:{args.port}")
+    if BRAIN_API_KEY:
+        logger.info("API key protection enabled. Set X-API-Key header or ?api_key= parameter.")
+    else:
+        logger.warning("No BRAIN_API_KEY set. Dashboard is open (local only).")
+
+    app.run(host=args.host, port=args.port, debug=args.debug)
+
+
+if __name__ == "__main__":
+    main()
