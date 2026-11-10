@@ -123,162 +123,6 @@ def get_connection():
     return secure_conn
 
 
-def _create_tables(conn):
-    """Initialize all brain tables."""
-    cur = conn.cursor()
-
-    # Contacts of people known to the agent
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS contacts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT,
-            phone TEXT,
-            company TEXT,
-            role TEXT,
-            source TEXT,           -- 'gmail', 'calendar', 'twitter', 'manual'
-            last_interaction TEXT, -- ISO timestamp
-            context_notes TEXT,    -- free-form notes about this person
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    # Emails from Gmail
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS emails (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_id TEXT UNIQUE,
-            thread_id TEXT,
-            sender TEXT,
-            recipient TEXT,
-            subject TEXT,
-            body TEXT,
-            snippet TEXT,
-            received_at TEXT,
-            labels TEXT,           -- JSON array
-            contact_id INTEGER,    -- FK to contacts
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (contact_id) REFERENCES contacts(id)
-        )
-    """)
-
-    # Calendar events from Google Calendar
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS calendar_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_id TEXT UNIQUE,
-            title TEXT,
-            description TEXT,
-            start_time TEXT,
-            end_time TEXT,
-            location TEXT,
-            attendees TEXT,        -- JSON array of emails
-            contact_id INTEGER,    -- FK to contacts (organizer or primary attendee)
-            source TEXT DEFAULT 'google_calendar',
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (contact_id) REFERENCES contacts(id)
-        )
-    """)
-
-    # Tweets from Twitter/X
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS tweets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tweet_id TEXT UNIQUE,
-            author_username TEXT,
-            author_name TEXT,
-            content TEXT,
-            created_at_twitter TEXT,
-            retrieved_at TEXT DEFAULT (datetime('now')),
-            url TEXT
-        )
-    """)
-
-    # Markdown notes from local folder
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            title TEXT,
-            content TEXT,
-            summary TEXT,
-            tags TEXT,             -- JSON array
-            last_modified TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    # Agent conversation history (for learning over time)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_message TEXT,
-            agent_response TEXT,
-            context_used TEXT,     -- JSON array of source IDs used
-            created_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    # Free-form knowledge entries (findings, connections between people, ideas)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS knowledge_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_type TEXT,       -- 'person_connection', 'idea', 'finding', 'preference'
-            title TEXT,
-            content TEXT,
-            related_contact_ids TEXT, -- JSON array of contact IDs
-            source TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    # Embeddings for semantic search (content chunks with TF-IDF vectors)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS embeddings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_type TEXT,       -- 'contact', 'email', 'note', 'event', 'knowledge'
-            source_id INTEGER,      -- FK to the source table
-            content_chunk TEXT,     -- the text that was embedded
-            embedding_json TEXT,    -- JSON array of TF-IDF floats
-            created_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    # Entities for knowledge graph (deduplicated people, companies, concepts)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS entities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            entity_type TEXT,       -- 'person', 'company', 'concept', 'project'
-            source TEXT,            -- 'manual', 'conversation', 'gmail', 'calendar'
-            context_notes TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    # Entity relations (knowledge graph edges)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS entity_relations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_entity_id INTEGER,   -- FK to entities.id
-            target_entity_id INTEGER,   -- FK to entities.id
-            relation_type TEXT,         -- 'works_at', 'knows', 'met_with', 'mentioned_in'
-            source TEXT,                -- 'conversation', 'email', 'manual'
-            confidence REAL DEFAULT 1.0,
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (source_entity_id) REFERENCES entities(id),
-            FOREIGN KEY (target_entity_id) REFERENCES entities(id)
-        )
-    """)
-
-    conn.commit()
-
 
 # =====================================================================
 # Contact Operations
@@ -312,6 +156,9 @@ def upsert_contact(conn, name, email=None, phone=None, company=None, role=None,
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, email, phone, company, role, source, context_notes, now))
         contact_id = cur.lastrowid
+        # Catat provenance untuk kontak baru
+        add_provenance(conn, 'contact', contact_id, source,
+                       source_detail=f'created: {name}', confidence=1.0)
 
     conn.commit()
     return contact_id
@@ -504,8 +351,12 @@ def insert_knowledge_entry(conn, entry_type, title, content,
          created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (entry_type, title, content, related_json, source, now, now))
+    entry_id = cur.lastrowid
+    # Catat provenance untuk entri pengetahuan baru
+    add_provenance(conn, 'knowledge', entry_id, source or 'manual',
+                   source_detail=f'created: {title}', confidence=1.0)
     conn.commit()
-    return cur.lastrowid
+    return entry_id
 
 
 def search_knowledge(conn, query, limit=20):
@@ -743,8 +594,13 @@ def add_entity_relation(conn, source_entity_id, target_entity_id, relation_type,
         (source_entity_id, target_entity_id, relation_type, source, confidence)
         VALUES (?, ?, ?, ?, ?)
     """, (source_entity_id, target_entity_id, relation_type, source, confidence))
+    relation_id = cur.lastrowid
+    # Catat provenance untuk relasi baru
+    add_provenance(conn, 'entity_relation', relation_id, source,
+                   source_detail=f'{relation_type}: {source_entity_id} -> {target_entity_id}',
+                   confidence=confidence)
     conn.commit()
-    return cur.lastrowid
+    return relation_id
 
 
 def get_entity_relations(conn, entity_id, limit=20):
@@ -1128,3 +984,457 @@ def import_brain_json(conn, data):
 
     conn.commit()
     return imported
+
+
+# =====================================================================
+# Provenance & Edit/Retraction (Fase 3b)
+# =====================================================================
+
+def _ensure_provenance_columns(conn):
+    """Add status/correction columns to existing tables if missing (idempotent)."""
+    cur = conn.cursor()
+
+    # contacts
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(contacts)").fetchall()}
+    for col, defn in [
+        ("status", "TEXT DEFAULT 'active'"),
+        ("corrected_at", "TEXT"),
+        ("corrected_by", "TEXT"),
+        ("original_name", "TEXT"),
+        ("original_email", "TEXT"),
+    ]:
+        if col not in cols:
+            cur.execute(f"ALTER TABLE contacts ADD COLUMN {col} {defn}")
+
+    # knowledge_entries
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(knowledge_entries)").fetchall()}
+    for col, defn in [
+        ("status", "TEXT DEFAULT 'active'"),
+        ("corrected_at", "TEXT"),
+        ("corrected_by", "TEXT"),
+        ("original_content", "TEXT"),
+    ]:
+        if col not in cols:
+            cur.execute(f"ALTER TABLE knowledge_entries ADD COLUMN {col} {defn}")
+
+    # entity_relations
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(entity_relations)").fetchall()}
+    for col, defn in [
+        ("status", "TEXT DEFAULT 'active'"),
+        ("corrected_at", "TEXT"),
+        ("corrected_by", "TEXT"),
+    ]:
+        if col not in cols:
+            cur.execute(f"ALTER TABLE entity_relations ADD COLUMN {col} {defn}")
+
+    conn.commit()
+
+
+def _create_tables(conn):
+    """Initialize all brain tables."""
+    cur = conn.cursor()
+
+    # Contacts of people known to the agent
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT,
+            phone TEXT,
+            company TEXT,
+            role TEXT,
+            source TEXT,           -- 'gmail', 'calendar', 'twitter', 'manual'
+            last_interaction TEXT, -- ISO timestamp
+            context_notes TEXT,    -- catatan bebas tentang orang ini
+            status TEXT DEFAULT 'active',   -- active, corrected, retracted
+            corrected_at TEXT,
+            corrected_by TEXT,
+            original_name TEXT,
+            original_email TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Emails from Gmail
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS emails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT UNIQUE,
+            thread_id TEXT,
+            sender TEXT,
+            recipient TEXT,
+            subject TEXT,
+            body TEXT,
+            snippet TEXT,
+            received_at TEXT,
+            labels TEXT,           -- JSON array
+            contact_id INTEGER,    -- FK to contacts
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (contact_id) REFERENCES contacts(id)
+        )
+    """)
+
+    # Calendar events from Google Calendar
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE,
+            title TEXT,
+            description TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            location TEXT,
+            attendees TEXT,        -- JSON array of emails
+            contact_id INTEGER,    -- FK to contacts (organizer atau primary attendee)
+            source TEXT DEFAULT 'google_calendar',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (contact_id) REFERENCES contacts(id)
+        )
+    """)
+
+    # Tweets from Twitter/X
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tweets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tweet_id TEXT UNIQUE,
+            author_username TEXT,
+            author_name TEXT,
+            content TEXT,
+            created_at_twitter TEXT,
+            retrieved_at TEXT DEFAULT (datetime('now')),
+            url TEXT
+        )
+    """)
+
+    # Markdown notes from local folder
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            title TEXT,
+            content TEXT,
+            summary TEXT,
+            tags TEXT,             -- JSON array
+            last_modified TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Agent conversation history (untuk belajar seiring waktu)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_message TEXT,
+            agent_response TEXT,
+            context_used TEXT,     -- JSON array of source IDs yang digunakan
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Free-form knowledge entries (findings, connections between people, ide)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_type TEXT,       -- 'person_connection', 'idea', 'finding', 'preference'
+            title TEXT,
+            content TEXT,
+            related_contact_ids TEXT, -- JSON array of contact IDs
+            source TEXT,
+            status TEXT DEFAULT 'active',   -- active, corrected, retracted
+            corrected_at TEXT,
+            corrected_by TEXT,
+            original_content TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Embeddings for semantic search (content chunks with TF-IDF vectors)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS embeddings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT,       -- 'contact', 'email', 'note', 'event', 'knowledge'
+            source_id INTEGER,      -- FK to the source table
+            content_chunk TEXT,     -- the text that was embedded
+            embedding_json TEXT,    -- JSON array of TF-IDF floats
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Entities for knowledge graph (deduplicated people, companies, concepts)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            entity_type TEXT,       -- 'person', 'company', 'concept', 'project'
+            source TEXT,            -- 'manual', 'conversation', 'gmail', 'calendar'
+            context_notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Entity relations (knowledge graph edges)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS entity_relations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_entity_id INTEGER,   -- FK to entities.id
+            target_entity_id INTEGER,   -- FK to entities.id
+            relation_type TEXT,         -- 'works_at', 'knows', 'met_with', 'mentioned_in'
+            source TEXT,                -- 'conversation', 'email', 'manual'
+            confidence REAL DEFAULT 1.0,
+            status TEXT DEFAULT 'active',   -- active, corrected, retracted
+            corrected_at TEXT,
+            corrected_by TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (source_entity_id) REFERENCES entities(id),
+            FOREIGN KEY (target_entity_id) REFERENCES entities(id)
+        )
+    """)
+
+    # Provenance entries — source trail for every fact
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS provenance_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_type TEXT NOT NULL,   -- 'contact', 'knowledge', 'entity_relation'
+            subject_id INTEGER NOT NULL,  -- FK to the subject table
+            source_type TEXT NOT NULL,    -- 'gmail', 'calendar', 'twitter', 'conversation', 'manual'
+            source_detail TEXT,           -- message_id, event_id, tweet_id, conversation_id, etc.
+            confidence REAL DEFAULT 1.0,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    conn.commit()
+    _ensure_provenance_columns(conn)
+
+
+# =====================================================================
+# Provenance Operations
+# =====================================================================
+
+def add_provenance(conn, subject_type, subject_id, source_type,
+                   source_detail=None, confidence=1.0):
+    """Catat sumber asal suatu fakta (provenance trail).
+
+    Args:
+        subject_type: 'contact', 'knowledge', atau 'entity_relation'
+        subject_id: ID baris di tabel subjek
+        source_type: 'gmail', 'calendar', 'twitter', 'conversation', 'manual'
+        source_detail: detail sumber (message_id, event_id, tweet_id, dll.)
+        confidence: skor kepercayaan 0.0-1.0
+    """
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute("""
+        INSERT INTO provenance_entries
+        (subject_type, subject_id, source_type, source_detail,
+         confidence, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (subject_type, subject_id, source_type, source_detail,
+          confidence, now, now))
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_provenance(conn, subject_type, subject_id):
+    """Ambil semua entri provenance untuk subjek tertentu."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM provenance_entries
+        WHERE subject_type = ? AND subject_id = ?
+        ORDER BY created_at DESC
+    """, (subject_type, subject_id))
+    return [dict(r) for r in cur.fetchall()]
+
+
+# =====================================================================
+# Edit / Retraction Operations
+# =====================================================================
+
+def retract_contact(conn, contact_id, reason, retracted_by):
+    """Tarik kembali kontak (tandai sebagai retracted, tidak menghapus data)."""
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, email FROM contacts WHERE id = ?", (contact_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    now = datetime.utcnow().isoformat()
+    cur.execute("""
+        UPDATE contacts
+        SET status = 'retracted',
+            corrected_at = ?,
+            corrected_by = ?,
+            original_name = name,
+            original_email = email,
+            updated_at = ?
+        WHERE id = ?
+    """, (now, retracted_by, now, contact_id))
+    # Catat provenance penarikan
+    cur.execute("""
+        INSERT INTO provenance_entries
+        (subject_type, subject_id, source_type, source_detail,
+         confidence, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, ('contact', contact_id, 'manual',
+          f'retracted: {reason}', 1.0, now, now))
+    conn.commit()
+    return contact_id
+
+
+def retract_knowledge_entry(conn, entry_id, reason, retracted_by):
+    """Tarik kembali entri pengetahuan."""
+    cur = conn.cursor()
+    cur.execute("SELECT id, content FROM knowledge_entries WHERE id = ?", (entry_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    now = datetime.utcnow().isoformat()
+    cur.execute("""
+        UPDATE knowledge_entries
+        SET status = 'retracted',
+            corrected_at = ?,
+            corrected_by = ?,
+            original_content = content,
+            updated_at = ?
+        WHERE id = ?
+    """, (now, retracted_by, now, entry_id))
+    cur.execute("""
+        INSERT INTO provenance_entries
+        (subject_type, subject_id, source_type, source_detail,
+         confidence, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, ('knowledge', entry_id, 'manual',
+          f'retracted: {reason}', 1.0, now, now))
+    conn.commit()
+    return entry_id
+
+
+def correct_knowledge_entry(conn, entry_id, new_content, corrected_by, reason):
+    """Perbaiki isi entri pengetahuan, simpan versi asli sebagai original_content."""
+    cur = conn.cursor()
+    cur.execute("SELECT id, content FROM knowledge_entries WHERE id = ?", (entry_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    now = datetime.utcnow().isoformat()
+    cur.execute("""
+        UPDATE knowledge_entries
+        SET content = ?,
+            status = 'corrected',
+            corrected_at = ?,
+            corrected_by = ?,
+            original_content = content,
+            updated_at = ?
+        WHERE id = ?
+    """, (new_content, now, corrected_by, now, entry_id))
+    cur.execute("""
+        INSERT INTO provenance_entries
+        (subject_type, subject_id, source_type, source_detail,
+         confidence, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, ('knowledge', entry_id, 'manual',
+          f'corrected: {reason}', 1.0, now, now))
+    conn.commit()
+    return entry_id
+
+
+# =====================================================================
+# Memory Consolidation (Fase 3b)
+# =====================================================================
+
+def consolidate_memory(conn, max_conversation_age_days=30,
+                       similarity_threshold=0.85):
+    """Konsolidasi memori:
+    1. Deduplikasi kontak yang sama (berdasarkan email atau nama).
+    2. Ringkas percakapan lama (> max_conversation_age_days hari)
+       menjadi entri knowledge.
+    3. Tandai entri knowledge lama (> 90 hari) untuk tinjauan ulang.
+
+    Returns dict dengan statistik tindakan.
+    """
+    from datetime import datetime, timedelta
+    stats = {
+        "contacts_deduplicated": 0,
+        "conversations_summarized": 0,
+        "knowledge_flagged": 0,
+    }
+
+    now = datetime.utcnow()
+    cutoff = (now - timedelta(days=max_conversation_age_days)).isoformat()
+
+    # --- 1. Deduplikasi kontak berdasarkan email ---
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, created_at
+        FROM contacts
+        WHERE email IS NOT NULL AND email != ''
+        ORDER BY email, created_at
+    """)
+    rows = cur.fetchall()
+    email_groups = {}
+    for r in rows:
+        email = r['email']
+        if email not in email_groups:
+            email_groups[email] = []
+        email_groups[email].append(dict(r))
+
+    for email, group in email_groups.items():
+        if len(group) <= 1:
+            continue
+        # Pertahankan yang paling baru, tarik kembali yang lama
+        group.sort(key=lambda r: r['created_at'] or '', reverse=True)
+        keeper = group[0]
+        for dup in group[1:]:
+            retract_contact(conn, dup['id'],
+                            f"Duplikat email {email}, digabungkan ke ID {keeper['id']}",
+                            "system_consolidation")
+            stats["contacts_deduplicated"] += 1
+
+    # --- 2. Ringkas percakapan lama menjadi entri knowledge ---
+    cur.execute("""
+        SELECT id, user_message, agent_response, created_at
+        FROM conversations
+        WHERE created_at < ?
+        ORDER BY created_at
+    """, (cutoff,))
+    old_convs = cur.fetchall()
+    for conv in old_convs:
+        # Buat entri knowledge dari percakapan lama
+        title = f"Ringkasan percakapan: {conv['user_message'][:50]}"
+        content = f"User: {conv['user_message']}\nAgen: {conv['agent_response']}"
+        insert_knowledge_entry(
+            conn,
+            entry_type="conversation_summary",
+            title=title,
+            content=content,
+            source="consolidation",
+        )
+        stats["conversations_summarized"] += 1
+
+    # --- 3. Tandai entri knowledge lama (> 90 hari) untuk tinjauan ---
+    review_cutoff = (now - timedelta(days=90)).isoformat()
+    cur.execute("""
+        SELECT id FROM knowledge_entries
+        WHERE status = 'active' AND created_at < ?
+    """, (review_cutoff,))
+    old_knowledge = cur.fetchall()
+    for k in old_knowledge:
+        # Tandai perlu ditinjau (hanya catatan provenance, status tetap active)
+        cur.execute("""
+            INSERT INTO provenance_entries
+            (subject_type, subject_id, source_type, source_detail,
+             confidence, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, ('knowledge', k['id'], 'system_consolidation',
+              'flagged_for_review: older than 90 days', 0.5,
+              now, now))
+        stats["knowledge_flagged"] += 1
+
+    conn.commit()
+    return stats
