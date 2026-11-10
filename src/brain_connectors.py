@@ -1,5 +1,5 @@
-"""Brain Connectors - Sinkronisasi data dari Gmail, Google Calendar,
-Twitter/X, dan folder catatan markdown ke SQLite brain."""
+"""Brain Connectors - Sync data from Gmail, Google Calendar,
+Twitter/X, and markdown notes folder to SQLite brain."""
 
 import os
 import json
@@ -16,14 +16,14 @@ from brain_db import (
 # =====================================================================
 
 def sync_gmail(google_creds, max_results=50):
-    """Sinkronisasi email dari Gmail ke brain.
+    """Sync emails from Gmail to brain.
 
     Args:
         google_creds: google.oauth2.credentials.Credentials (valid OAuth token)
-        max_results: Jumlah email maksimum yang diambil
+        max_results: Maximum number of emails to retrieve
 
     Returns:
-        dict dengan statistik sinkronisasi
+        dict with sync statistics
     """
     from googleapiclient.discovery import build
 
@@ -32,7 +32,7 @@ def sync_gmail(google_creds, max_results=50):
     stats = {"emails": 0, "contacts": 0}
 
     try:
-        # Ambil daftar message ID
+        # Retrieve message ID list
         result = service.users().messages().list(
             userId='me', maxResults=max_results
         ).execute()
@@ -52,11 +52,11 @@ def sync_gmail(google_creds, max_results=50):
             snippet = msg_data.get('snippet', '')
             received_at = headers.get('Date', '')
 
-            # Ekstrak email dari sender
+            # Extract email from sender
             sender_email = _extract_email(sender)
             sender_name = _extract_name(sender)
 
-            # Simpan atau update kontak
+            # Insert or update contact
             contact_id = None
             if sender_email:
                 contact_id = upsert_contact(
@@ -66,7 +66,7 @@ def sync_gmail(google_creds, max_results=50):
                 update_contact_interaction(conn, contact_id)
                 stats["contacts"] += 1
 
-            # Simpan email
+            # Insert email
             insert_email(
                 conn, message_id=message_id, thread_id=thread_id,
                 sender=sender, recipient=recipient, subject=subject,
@@ -84,14 +84,14 @@ def sync_gmail(google_creds, max_results=50):
 
 
 def _extract_email(from_header):
-    """Ekstrak alamat email dari header From: 'Nama <email@domain.com>'."""
+    """Extract email address from From header: 'Name <email@domain.com>'."""
     import re
     if not from_header:
         return None
     match = re.search(r'<([^>]+)>', from_header)
     if match:
         return match.group(1)
-    # Jika tidak ada bracket, asumsi seluruhnya adalah email
+    # If no brackets, assume the whole string is an email
     parts = from_header.strip().split()
     for part in parts:
         if '@' in part:
@@ -100,7 +100,7 @@ def _extract_email(from_header):
 
 
 def _extract_name(from_header):
-    """Ekstrak nama dari header From."""
+    """Extract name from From header."""
     import re
     if not from_header:
         return None
@@ -115,7 +115,7 @@ def _extract_name(from_header):
 # =====================================================================
 
 def sync_google_calendar(google_creds, max_results=50):
-    """Sinkronisasi event kalender ke brain."""
+    """Sync calendar events to brain."""
     from googleapiclient.discovery import build
 
     service = build('calendar', 'v3', credentials=google_creds)
@@ -136,7 +136,7 @@ def sync_google_calendar(google_creds, max_results=50):
 
         for event in events:
             event_id = event.get('id', '')
-            title = event.get('summary', '(Tanpa Judul)')
+            title = event.get('summary', '(No Title)')
             description = event.get('description', '')
             start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))
             end = event.get('end', {}).get('dateTime', event.get('end', {}).get('date', ''))
@@ -144,7 +144,7 @@ def sync_google_calendar(google_creds, max_results=50):
             attendees = event.get('attendees', [])
             attendee_emails = [a.get('email', '') for a in attendees if a.get('email')]
 
-            # Hubungkan dengan kontak (organizer atau attendee pertama)
+            # Link to contact (organizer or first attendee)
             contact_id = None
             organizer = event.get('organizer', {})
             organizer_email = organizer.get('email', '')
@@ -182,12 +182,12 @@ def sync_google_calendar(google_creds, max_results=50):
 # =====================================================================
 
 def sync_twitter(bearer_token, username=None, max_results=50):
-    """Sinkronisasi tweet dari Twitter/X ke brain.
+    """Sync tweets from Twitter/X to brain.
 
     Args:
         bearer_token: Twitter API v2 Bearer Token
-        username: Username target (opsional, jika None maka timeline pengguna)
-        max_results: Jumlah tweet maksimum
+        username: Target username (optional, if None then user timeline)
+        max_results: Maximum number of tweets
     """
     import requests
 
@@ -198,7 +198,7 @@ def sync_twitter(bearer_token, username=None, max_results=50):
         headers = {"Authorization": f"Bearer {bearer_token}"}
 
         if username:
-            # Ambil user ID dari username
+            # Get user ID from username
             user_resp = requests.get(
                 f"https://api.twitter.com/2/users/by/username/{username}",
                 headers=headers
@@ -206,15 +206,15 @@ def sync_twitter(bearer_token, username=None, max_results=50):
             user_resp.raise_for_status()
             user_id = user_resp.json()['data']['id']
 
-            # Ambil tweet dari user tersebut
+            # Get tweets from that user
             tweet_resp = requests.get(
                 f"https://api.twitter.com/2/users/{user_id}/tweets",
                 headers=headers,
                 params={"max_results": max_results, "tweet.fields": "created_at,author_id"}
             )
         else:
-            # Timeline home (memerlukan OAuth 1.0a user context, bukan bearer token alone)
-            raise ValueError("Bearer token hanya mendukung lookup user. Gunakan OAuth 1.0a untuk timeline.")
+            # Home timeline (requires OAuth 1.0a user context, not bearer token alone)
+            raise ValueError("Bearer token only supports user lookup. Use OAuth 1.0a for timeline.")
 
         if tweet_resp.status_code == 200:
             tweets = tweet_resp.json().get('data', [])
@@ -243,14 +243,14 @@ def sync_twitter(bearer_token, username=None, max_results=50):
 # =====================================================================
 
 def sync_markdown_notes(notes_folder):
-    """Sinkronisasi file .md dari folder lokal ke brain.
+    """Sync .md files from local folder to brain.
 
     Args:
-        notes_folder: Path ke folder berisi file markdown
+        notes_folder: Path to folder containing markdown files
     """
     folder = Path(notes_folder)
     if not folder.exists():
-        raise FileNotFoundError(f"Folder notes tidak ditemukan: {notes_folder}")
+        raise FileNotFoundError(f"Notes folder not found: {notes_folder}")
 
     conn = get_connection()
     stats = {"notes": 0}
@@ -286,7 +286,7 @@ def sync_markdown_notes(notes_folder):
 
 
 def _extract_title(filename, content):
-    """Ambil judul dari H1 markdown atau gunakan nama file."""
+    """Extract title from H1 markdown or use filename."""
     import re
     match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
     if match:
@@ -295,14 +295,14 @@ def _extract_title(filename, content):
 
 
 def _extract_tags(content):
-    """Ekstrak tag dari markdown (#tag)."""
+    """Extract tags from markdown (#tag)."""
     import re
     tags = re.findall(r'#(\w+)', content)
     return list(set(tags))[:10]
 
 
 def _summarize(content, max_chars=200):
-    """Ringkasan sederhana: paragraf pertama."""
+    """Simple summary: first paragraph."""
     lines = [l.strip() for l in content.split('\n') if l.strip() and not l.startswith('#')]
     if lines:
         summary = ' '.join(lines)[:max_chars]
@@ -313,19 +313,19 @@ def _summarize(content, max_chars=200):
 
 
 # =====================================================================
-# 5. SYNC SEMUA (panggilan utama)
+# 5. SYNC ALL (main entry point)
 # =====================================================================
 
 def sync_all(google_creds=None, twitter_bearer=None, notes_folder=None):
-    """Jalankan sinkronisasi dari semua sumber yang tersedia.
+    """Run sync from all available sources.
 
     Args:
-        google_creds: Google OAuth credentials (untuk Gmail + Calendar)
-        twitter_bearer: Twitter Bearer Token (opsional)
-        notes_folder: Path folder markdown notes (opsional)
+        google_creds: Google OAuth credentials (for Gmail + Calendar)
+        twitter_bearer: Twitter Bearer Token (optional)
+        notes_folder: Path to markdown notes folder (optional)
 
     Returns:
-        dict dengan statistik per sumber
+        dict with statistics per source
     """
     results = {}
 

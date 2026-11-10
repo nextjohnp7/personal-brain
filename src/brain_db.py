@@ -1,7 +1,7 @@
-"""Personal Brain Database - SQLite lokal untuk knowledge base agen.
+"""Personal Brain Database - SQLite database for agent knowledge base.
 
-Semua data tersimpan di satu file SQLite di komputer user.
-Tidak ada server yang diperlukan.
+All data is stored in a single SQLite file on the user's computer.
+No server is required.
 """
 
 import sqlite3
@@ -10,13 +10,13 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-# Lokasi database di project root
+# Database location at project root
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 DB_PATH = PROJECT_ROOT / "brain.db"
 
 
 def get_connection():
-    """Buka koneksi ke SQLite database. Buat tabel jika belum ada."""
+    """Open a connection to the SQLite database. Create tables if they do not exist."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     _create_tables(conn)
@@ -24,10 +24,10 @@ def get_connection():
 
 
 def _create_tables(conn):
-    """Inisialisasi semua tabel brain."""
+    """Initialize all brain tables."""
     cur = conn.cursor()
 
-    # Kontak orang yang dikenal agen
+    # Contacts of people known to the agent
     cur.execute("""
         CREATE TABLE IF NOT EXISTS contacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,13 +38,13 @@ def _create_tables(conn):
             role TEXT,
             source TEXT,           -- 'gmail', 'calendar', 'twitter', 'manual'
             last_interaction TEXT, -- ISO timestamp
-            context_notes TEXT,    -- catatan bebas tentang orang ini
+            context_notes TEXT,    -- free-form notes about this person
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
-    # Email dari Gmail
+    # Emails from Gmail
     cur.execute("""
         CREATE TABLE IF NOT EXISTS emails (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,13 +57,13 @@ def _create_tables(conn):
             snippet TEXT,
             received_at TEXT,
             labels TEXT,           -- JSON array
-            contact_id INTEGER,    -- FK ke contacts
+            contact_id INTEGER,    -- FK to contacts
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (contact_id) REFERENCES contacts(id)
         )
     """)
 
-    # Event kalender dari Google Calendar
+    # Calendar events from Google Calendar
     cur.execute("""
         CREATE TABLE IF NOT EXISTS calendar_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +74,7 @@ def _create_tables(conn):
             end_time TEXT,
             location TEXT,
             attendees TEXT,        -- JSON array of emails
-            contact_id INTEGER,    -- FK ke contacts (organizer atau primary attendee)
+            contact_id INTEGER,    -- FK to contacts (organizer or primary attendee)
             source TEXT DEFAULT 'google_calendar',
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now')),
@@ -82,7 +82,7 @@ def _create_tables(conn):
         )
     """)
 
-    # Tweet dari Twitter/X
+    # Tweets from Twitter/X
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tweets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +96,7 @@ def _create_tables(conn):
         )
     """)
 
-    # Catatan markdown dari folder lokal
+    # Markdown notes from local folder
     cur.execute("""
         CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,18 +112,18 @@ def _create_tables(conn):
         )
     """)
 
-    # Riwayat percakapan agen (untuk belajar seiring waktu)
+    # Agent conversation history (for learning over time)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_message TEXT,
             agent_response TEXT,
-            context_used TEXT,     -- JSON array of source IDs yang digunakan
+            context_used TEXT,     -- JSON array of source IDs used
             created_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
-    # Entri knowledge bebas (findings, connections between people, ide)
+    # Free-form knowledge entries (findings, connections between people, ideas)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS knowledge_entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,14 +141,14 @@ def _create_tables(conn):
 
 
 # =====================================================================
-# Operasi Kontak
+# Contact Operations
 # =====================================================================
 
 def upsert_contact(conn, name, email=None, phone=None, company=None, role=None,
                    source='manual', context_notes=None):
-    """Masukkan atau update kontak. Return contact_id."""
+    """Insert or update a contact. Returns contact_id."""
     cur = conn.cursor()
-    # Cari kontak existing berdasarkan email atau nama
+    # Search for existing contact by email or name
     cur.execute("SELECT id FROM contacts WHERE email = ? OR name = ?", (email, name))
     row = cur.fetchone()
     now = datetime.utcnow().isoformat()
@@ -184,7 +184,7 @@ def get_contact(conn, contact_id):
 
 
 def search_contacts(conn, query, limit=20):
-    """Cari kontak berdasarkan nama, email, atau catatan."""
+    """Search contacts by name, email, or notes."""
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
@@ -197,7 +197,7 @@ def search_contacts(conn, query, limit=20):
 
 
 def update_contact_interaction(conn, contact_id):
-    """Tandai terakhir berinteraksi dengan kontak ini."""
+    """Mark last interaction with this contact."""
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
     cur.execute("UPDATE contacts SET last_interaction = ?, updated_at = ? WHERE id = ?",
@@ -206,7 +206,7 @@ def update_contact_interaction(conn, contact_id):
 
 
 # =====================================================================
-# Operasi Email
+# Email Operations
 # =====================================================================
 
 def insert_email(conn, message_id, thread_id, sender, recipient, subject, body,
@@ -225,7 +225,7 @@ def insert_email(conn, message_id, thread_id, sender, recipient, subject, body,
 
 
 def search_emails(conn, query, limit=20):
-    """Cari email berdasarkan subjek, isi, atau pengirim."""
+    """Search emails by subject, body, sender, or recipient."""
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
@@ -247,7 +247,7 @@ def get_emails_for_contact(conn, contact_id, limit=10):
 
 
 # =====================================================================
-# Operasi Kalender
+# Calendar Operations
 # =====================================================================
 
 def upsert_calendar_event(conn, event_id, title, description, start_time, end_time,
@@ -278,7 +278,7 @@ def upsert_calendar_event(conn, event_id, title, description, start_time, end_ti
 
 
 def get_upcoming_events(conn, limit=10):
-    """Ambil event kalender mendatang."""
+    """Retrieve upcoming calendar events."""
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
     cur.execute("""
@@ -291,7 +291,7 @@ def get_upcoming_events(conn, limit=10):
 
 
 # =====================================================================
-# Operasi Tweet
+# Tweet Operations
 # =====================================================================
 
 def insert_tweet(conn, tweet_id, author_username, author_name, content,
@@ -307,7 +307,7 @@ def insert_tweet(conn, tweet_id, author_username, author_name, content,
 
 
 # =====================================================================
-# Operasi Notes
+# Notes Operations
 # =====================================================================
 
 def upsert_note(conn, filename, file_path, title, content, summary=None,
@@ -337,7 +337,7 @@ def upsert_note(conn, filename, file_path, title, content, summary=None,
 
 
 def search_notes(conn, query, limit=20):
-    """Cari catatan berdasarkan judul, isi, atau tag."""
+    """Search notes by title, content, or tags."""
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
@@ -350,7 +350,7 @@ def search_notes(conn, query, limit=20):
 
 
 # =====================================================================
-# Operasi Knowledge Entries
+# Knowledge Entries Operations
 # =====================================================================
 
 def insert_knowledge_entry(conn, entry_type, title, content,
@@ -381,7 +381,7 @@ def search_knowledge(conn, query, limit=20):
 
 
 # =====================================================================
-# Operasi Conversations
+# Conversations Operations
 # =====================================================================
 
 def log_conversation(conn, user_message, agent_response, context_used=None):
@@ -396,11 +396,11 @@ def log_conversation(conn, user_message, agent_response, context_used=None):
 
 
 # =====================================================================
-# Search Global (di semua tabel)
+# Global Search (across all tables)
 # =====================================================================
 
 def global_search(conn, query, limit=10):
-    """Cari di kontak, email, kalender, tweet, notes, dan knowledge."""
+    """Search across contacts, emails, calendar, tweets, notes, and knowledge."""
     results = {
         "contacts": [dict(r) for r in search_contacts(conn, query, limit)],
         "emails": [dict(r) for r in search_emails(conn, query, limit)],

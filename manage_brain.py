@@ -1,17 +1,17 @@
-"""Manajer Brain Lokal (Opsi A) - tanpa Google/Twitter.
+"""Local Brain Manager (Option A) - without Google/Twitter.
 
-Fitur:
-- Tambah/update kontak secara manual
-- Sinkronisasi catatan markdown dari folder lokal
-- Cari di brain (kontak, notes, knowledge)
-- Lihat semua kontak dan notes
+Features:
+- Add/update contacts manually
+- Sync markdown notes from local folder
+- Search brain (contacts, notes, knowledge)
+- List all contacts and notes
 """
 
 import sys
 import os
 from pathlib import Path
 
-# Pastikan src bisa diimpor
+# Ensure src is importable
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from brain_db import (
@@ -22,114 +22,114 @@ from brain_db import (
 from brain_connectors import sync_markdown_notes
 
 
-def tambah_kontak(conn):
-    print("\n=== TAMBAH KONTAK ===")
-    nama = input("Nama: ").strip()
-    email = input("Email (opsional): ").strip() or None
-    telepon = input("Telepon (opsional): ").strip() or None
-    perusahaan = input("Perusahaan (opsional): ").strip() or None
-    jabatan = input("Jabatan (opsional): ").strip() or None
-    catatan = input("Catatan (opsional): ").strip() or None
+def add_contact(conn):
+    print("\n=== ADD CONTACT ===")
+    name = input("Name: ").strip()
+    email = input("Email (optional): ").strip() or None
+    phone = input("Phone (optional): ").strip() or None
+    company = input("Company (optional): ").strip() or None
+    role = input("Role (optional): ").strip() or None
+    notes = input("Notes (optional): ").strip() or None
 
     cid = upsert_contact(
-        conn, name=nama, email=email, phone=telepon,
-        company=perusahaan, role=jabatan,
-        source='manual', context_notes=catatan
+        conn, name=name, email=email, phone=phone,
+        company=company, role=role,
+        source='manual', context_notes=notes
     )
-    print(f"Kontak disimpan dengan ID: {cid}")
+    print(f"Contact saved with ID: {cid}")
 
 
-def lihat_kontak(conn):
-    print("\n=== DAFTAR KONTAK ===")
-    kontak = search_contacts(conn, "", limit=100)
-    if not kontak:
-        print("(belum ada kontak)")
+def list_contacts(conn):
+    print("\n=== CONTACT LIST ===")
+    contacts = search_contacts(conn, "", limit=100)
+    if not contacts:
+        print("(no contacts yet)")
         return
-    for k in kontak:
-        print(f"#{k['id']} | {k['name']} | {k.get('email', '-')} | {k.get('company', '-')}")
+    for c in contacts:
+        print(f"#{c['id']} | {c['name']} | {c.get('email', '-')} | {c.get('company', '-')}")
 
 
-def cari_kontak(conn):
-    print("\n=== CARI KONTAK ===")
-    q = input("Kata kunci: ").strip()
-    hasil = search_contacts(conn, q, limit=20)
-    if not hasil:
-        print("(tidak ditemukan)")
+def search_contacts_cmd(conn):
+    print("\n=== SEARCH CONTACTS ===")
+    q = input("Keyword: ").strip()
+    results = search_contacts(conn, q, limit=20)
+    if not results:
+        print("(not found)")
         return
-    for k in hasil:
-        print(f"#{k['id']} | {k['name']} | {k.get('email', '-')} | {k.get('company', '-')}")
-        if k.get('context_notes'):
-            print(f"    Catatan: {k['context_notes']}")
+    for c in results:
+        print(f"#{c['id']} | {c['name']} | {c.get('email', '-')} | {c.get('company', '-')}")
+        if c.get('context_notes'):
+            print(f"    Notes: {c['context_notes']}")
 
 
-def sinkron_notes(conn):
-    print("\n=== SINKRONISASI NOTES ===")
+def sync_notes(conn):
+    print("\n=== SYNC NOTES ===")
     folder = os.environ.get('BRAIN_NOTES_FOLDER', 'D:/Project GitHub Brain Memory/Notes')
     try:
         stats = sync_markdown_notes(folder)
-        print(f"Selesai. Notes disinkronkan: {stats['notes']}")
+        print(f"Done. Notes synced: {stats['notes']}")
     except Exception as e:
         print(f"Error: {e}")
 
 
-def cari_notes(conn):
-    print("\n=== CARI NOTES ===")
-    q = input("Kata kunci: ").strip()
-    hasil = search_notes(conn, q, limit=20)
-    if not hasil:
-        print("(tidak ditemukan)")
+def search_notes_cmd(conn):
+    print("\n=== SEARCH NOTES ===")
+    q = input("Keyword: ").strip()
+    results = search_notes(conn, q, limit=20)
+    if not results:
+        print("(not found)")
         return
-    for n in hasil:
+    for n in results:
         print(f"#{n['id']} | {n.get('title', '-')} | {n.get('filename', '-')}")
         if n.get('summary'):
-            print(f"    Ringkasan: {n['summary'][:150]}")
+            print(f"    Summary: {n['summary'][:150]}")
 
 
-def cari_semua(conn):
-    print("\n=== CARI DI SEMUA BRAIN ===")
-    q = input("Kata kunci: ").strip()
-    hasil = global_search(conn, q, limit=10)
-    print(f"Kontak: {len(hasil['contacts'])}")
-    print(f"Email: {len(hasil['emails'])}")
-    print(f"Kalender: {len(hasil['events'])}")
-    print(f"Tweet: {len(hasil['tweets'])}")
-    print(f"Notes: {len(hasil['notes'])}")
-    print(f"Knowledge: {len(hasil['knowledge'])}")
+def search_all(conn):
+    print("\n=== SEARCH ENTIRE BRAIN ===")
+    q = input("Keyword: ").strip()
+    results = global_search(conn, q, limit=10)
+    print(f"Contacts: {len(results['contacts'])}")
+    print(f"Emails: {len(results['emails'])}")
+    print(f"Calendar: {len(results['events'])}")
+    print(f"Tweets: {len(results['tweets'])}")
+    print(f"Notes: {len(results['notes'])}")
+    print(f"Knowledge: {len(results['knowledge'])}")
 
 
 def main():
     conn = get_connection()
-    print("Brain Lokal siap. Database:", conn)
+    print("Local Brain ready. Database:", conn)
 
     while True:
-        print("\n=== MENU BRAIN ===")
-        print("1. Tambah kontak")
-        print("2. Lihat semua kontak")
-        print("3. Cari kontak")
-        print("4. Sinkronisasi notes dari folder")
-        print("5. Cari notes")
-        print("6. Cari di semua brain")
-        print("0. Keluar")
+        print("\n=== BRAIN MENU ===")
+        print("1. Add contact")
+        print("2. List all contacts")
+        print("3. Search contacts")
+        print("4. Sync notes from folder")
+        print("5. Search notes")
+        print("6. Search entire brain")
+        print("0. Exit")
 
-        pilihan = input("\nPilih: ").strip()
+        choice = input("\nSelect: ").strip()
 
-        if pilihan == '1':
-            tambah_kontak(conn)
-        elif pilihan == '2':
-            lihat_kontak(conn)
-        elif pilihan == '3':
-            cari_kontak(conn)
-        elif pilihan == '4':
-            sinkron_notes(conn)
-        elif pilihan == '5':
-            cari_notes(conn)
-        elif pilihan == '6':
-            cari_semua(conn)
-        elif pilihan == '0':
-            print("Sampai jumpa!")
+        if choice == '1':
+            add_contact(conn)
+        elif choice == '2':
+            list_contacts(conn)
+        elif choice == '3':
+            search_contacts_cmd(conn)
+        elif choice == '4':
+            sync_notes(conn)
+        elif choice == '5':
+            search_notes_cmd(conn)
+        elif choice == '6':
+            search_all(conn)
+        elif choice == '0':
+            print("Goodbye!")
             break
         else:
-            print("Pilihan tidak valid.")
+            print("Invalid choice.")
 
     conn.close()
 
