@@ -47,19 +47,33 @@ from brain_db import (
 
 mcp = FastMCP("Personal Brain")
 
+# MCP API key protection
+BRAIN_MCP_API_KEY = os.environ.get("BRAIN_MCP_API_KEY", "")
+
+
+def _check_mcp_api_key(api_key: str) -> str | None:
+    """Returns error message if API key invalid, None if valid (or auth disabled)."""
+    if BRAIN_MCP_API_KEY and api_key != BRAIN_MCP_API_KEY:
+        return "Invalid or missing MCP API key. Set BRAIN_MCP_API_KEY environment variable."
+    return None
+
 
 def _conn():
     return get_connection()
 
 
 @mcp.tool()
-def brain_search(query: str, limit: int = 10) -> str:
+def brain_search(query: str, limit: int = 10, api_key: str = "") -> str:
     """Search the personal brain across contacts, emails, calendar, notes, knowledge, and semantic matches.
 
     Args:
         query: Search keyword or phrase
         limit: Maximum results per source (default: 10)
+        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
     """
+    auth_error = _check_mcp_api_key(api_key)
+    if auth_error:
+        return auth_error
     conn = _conn()
     try:
         contacts = [dict(r) for r in search_contacts(conn, query, limit)]
@@ -120,12 +134,16 @@ def brain_search(query: str, limit: int = 10) -> str:
 
 
 @mcp.tool()
-def brain_contact_context(name: str) -> str:
+def brain_contact_context(name: str, api_key: str = "") -> str:
     """Get full context for a specific contact including emails, calendar events, and knowledge graph relations.
 
     Args:
         name: Contact name to look up
+        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
     """
+    auth_error = _check_mcp_api_key(api_key)
+    if auth_error:
+        return auth_error
     conn = _conn()
     try:
         contacts = [dict(r) for r in search_contacts(conn, name, limit=1)]
@@ -170,7 +188,7 @@ def brain_contact_context(name: str) -> str:
 
 
 @mcp.tool()
-def brain_add_contact(name: str, email: str = "", phone: str = "", company: str = "", role: str = "", notes: str = "") -> str:
+def brain_add_contact(name: str, email: str = "", phone: str = "", company: str = "", role: str = "", notes: str = "", api_key: str = "") -> str:
     """Add or update a contact in the personal brain.
 
     Args:
@@ -180,7 +198,11 @@ def brain_add_contact(name: str, email: str = "", phone: str = "", company: str 
         company: Company name (optional)
         role: Job role (optional)
         notes: Free-form notes (optional)
+        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
     """
+    auth_error = _check_mcp_api_key(api_key)
+    if auth_error:
+        return auth_error
     conn = _conn()
     try:
         cid = upsert_contact(
@@ -199,7 +221,7 @@ def brain_add_contact(name: str, email: str = "", phone: str = "", company: str 
 
 
 @mcp.tool()
-def brain_add_relation(source_name: str, target_name: str, relation_type: str, source: str = "manual", confidence: float = 1.0) -> str:
+def brain_add_relation(source_name: str, target_name: str, relation_type: str, source: str = "manual", confidence: float = 1.0, api_key: str = "") -> str:
     """Add a relation between two entities in the knowledge graph.
 
     Args:
@@ -208,7 +230,11 @@ def brain_add_relation(source_name: str, target_name: str, relation_type: str, s
         relation_type: Type of relation (e.g., 'works_at', 'knows', 'met_with')
         source: Source of the relation (default: manual)
         confidence: Confidence score 0.0-1.0 (default: 1.0)
+        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
     """
+    auth_error = _check_mcp_api_key(api_key)
+    if auth_error:
+        return auth_error
     conn = _conn()
     try:
         src_eid = upsert_entity(conn, name=source_name, entity_type='person', source='mcp')
@@ -227,13 +253,17 @@ def brain_add_relation(source_name: str, target_name: str, relation_type: str, s
 
 
 @mcp.tool()
-def brain_semantic_search(query: str, limit: int = 10) -> str:
+def brain_semantic_search(query: str, limit: int = 10, api_key: str = "") -> str:
     """Semantic search using TF-IDF + cosine similarity. Finds content by meaning, not just keywords.
 
     Args:
         query: Search phrase
         limit: Maximum results (default: 10)
+        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
     """
+    auth_error = _check_mcp_api_key(api_key)
+    if auth_error:
+        return auth_error
     conn = _conn()
     try:
         results = semantic_search(conn, query, limit=limit)
@@ -249,13 +279,17 @@ def brain_semantic_search(query: str, limit: int = 10) -> str:
 
 
 @mcp.tool()
-def brain_knowledge_graph(name: str, limit: int = 10) -> str:
+def brain_knowledge_graph(name: str, limit: int = 10, api_key: str = "") -> str:
     """Query the knowledge graph for a person or entity, showing all relations.
 
     Args:
         name: Entity name to query
         limit: Maximum relations (default: 10)
+        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
     """
+    auth_error = _check_mcp_api_key(api_key)
+    if auth_error:
+        return auth_error
     conn = _conn()
     try:
         graph = query_knowledge_graph(conn, name, limit=limit)

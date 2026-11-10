@@ -18,11 +18,15 @@ import json
 import argparse
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from flask import Flask, render_template_string, request, redirect, url_for, jsonify, session, flash
+from flask import (
+    Flask, render_template_string, request, redirect,
+    url_for, jsonify, session, flash,
+)
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from brain_db import (
     get_connection,
@@ -61,6 +65,28 @@ app.secret_key = os.environ.get("BRAIN_DASHBOARD_SECRET", "dev-secret-change-me"
 # Simple API key protection for sharing
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
 
+# Web dashboard authentication
+DASHBOARD_USER = os.environ.get("BRAIN_DASHBOARD_USER", "")
+DASHBOARD_PASSWORD_HASH = os.environ.get("BRAIN_DASHBOARD_PASSWORD_HASH", "")
+# If BRAIN_DASHBOARD_PASSWORD is set (plaintext), hash it on first run
+DASHBOARD_PASSWORD_PLAIN = os.environ.get("BRAIN_DASHBOARD_PASSWORD", "")
+if DASHBOARD_PASSWORD_PLAIN and not DASHBOARD_PASSWORD_HASH:
+    DASHBOARD_PASSWORD_HASH = generate_password_hash(DASHBOARD_PASSWORD_PLAIN)
+
+AUTH_ENABLED = bool(DASHBOARD_USER and DASHBOARD_PASSWORD_HASH)
+
+
+def require_login(f):
+    """Decorator to require login if AUTH_ENABLED."""
+    from functools import wraps
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if AUTH_ENABLED and not session.get("user_id"):
+            return redirect(url_for("login", next=request.url))
+        return f(*args, **kwargs)
+    return decorated
+
 
 def require_api_key(f):
     """Decorator to require API key if BRAIN_API_KEY is set."""
@@ -80,11 +106,36 @@ def get_conn():
     return get_connection()
 
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not AUTH_ENABLED:
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if username == DASHBOARD_USER and check_password_hash(DASHBOARD_PASSWORD_HASH, password):
+            session["user_id"] = username
+            session.permanent = True
+            app.permanent_session_lifetime = timedelta(days=7)
+            next_url = request.args.get("next") or url_for("index")
+            return redirect(next_url)
+        flash("Invalid username or password", "error")
+    return render_template_string(LOGIN_HTML)
+
+
+@app.route("/logout")
+def logout():
+    session.pop("user_id", None)
+    flash("Logged out successfully", "success")
+    return redirect(url_for("login" if AUTH_ENABLED else "index"))
+
+
 # ----------------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------------
 
 @app.route("/")
+@require_login
 def index():
     conn = get_conn()
     try:
@@ -108,6 +159,7 @@ def index():
 # ---- Contacts ----
 
 @app.route("/contacts")
+@require_login
 def list_contacts():
     q = request.args.get("q", "")
     conn = get_conn()
@@ -119,6 +171,7 @@ def list_contacts():
 
 
 @app.route("/contacts/add", methods=["GET", "POST"])
+@require_login
 def add_contact():
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -143,6 +196,7 @@ def add_contact():
 
 
 @app.route("/contacts/<int:contact_id>/edit", methods=["GET", "POST"])
+@require_login
 def edit_contact(contact_id):
     conn = get_conn()
     try:
@@ -172,6 +226,7 @@ def edit_contact(contact_id):
 
 
 @app.route("/contacts/<int:contact_id>/delete", methods=["POST"])
+@require_login
 def delete_contact_route(contact_id):
     conn = get_conn()
     try:
@@ -187,6 +242,7 @@ def delete_contact_route(contact_id):
 # ---- Notes ----
 
 @app.route("/notes")
+@require_login
 def list_notes():
     q = request.args.get("q", "")
     conn = get_conn()
@@ -198,6 +254,7 @@ def list_notes():
 
 
 @app.route("/notes/add", methods=["GET", "POST"])
+@require_login
 def add_note():
     if request.method == "POST":
         title = request.form.get("title", "").strip()
@@ -221,6 +278,7 @@ def add_note():
 
 
 @app.route("/notes/<int:note_id>/edit", methods=["GET", "POST"])
+@require_login
 def edit_note(note_id):
     conn = get_conn()
     try:
@@ -251,6 +309,7 @@ def edit_note(note_id):
 
 
 @app.route("/notes/<int:note_id>/delete", methods=["POST"])
+@require_login
 def delete_note_route(note_id):
     conn = get_conn()
     try:
@@ -266,6 +325,7 @@ def delete_note_route(note_id):
 # ---- Search ----
 
 @app.route("/search")
+@require_login
 def search():
     q = request.args.get("q", "")
     conn = get_conn()
@@ -283,6 +343,7 @@ def search():
 # ---- Knowledge Graph ----
 
 @app.route("/graph")
+@require_login
 def graph():
     q = request.args.get("q", "")
     conn = get_conn()
@@ -367,6 +428,7 @@ def import_brain():
 # ---- Conversations ----
 
 @app.route("/conversations")
+@require_login
 def conversations():
     conn = get_conn()
     try:
@@ -792,6 +854,23 @@ IMPORT_HTML = BASE_HTML.replace("</div>", """
         </div>
         <button type="submit" class="btn">Import</a>
     </form>
+</div>
+""")
+
+LOGIN_HTML = BASE_HTML.replace("</div>", """
+    <h2>Login</h2>
+    <form method="POST">
+        <div class="form-group">
+            <label>Username</label>
+            <input type="text" name="username" required>
+        </div>
+        <div class="form-group">
+            <label>Password</label>
+            <input type="password" name="password" required>
+        </div>
+        <button type="submit" class="btn">Login</button>
+    </form>
+    <p><small>Set BRAIN_DASHBOARD_USER and BRAIN_DASHBOARD_PASSWORD to enable login.</small></p>
 </div>
 """)
 
