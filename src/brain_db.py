@@ -1663,3 +1663,427 @@ def upsert_note_with_owner(conn, filename, file_path, title, content, summary=No
 
     conn.commit()
     return note_id
+
+
+# =====================================================================
+# Export Markdown with Backlinks (Fase 3g)
+# =====================================================================
+
+def _sanitize_filename(name):
+    """Buat nama file yang aman dari nama entitas."""
+    import re
+    safe = re.sub(r'[<>:"/\\|?*]', '_', name.strip())
+    safe = re.sub(r'\s+', '_', safe)
+    return safe or 'untitled'
+
+
+def _add_backlinks(text, entity_names):
+    """Ganti nama entitas dalam teks dengan wiki-style backlinks [[Nama]].
+
+    Hanya mengganti jika nama belum ada dalam konteks link [[...]] atau ( ... ).
+    """
+    import re
+
+    # Urutkan nama berdasarkan panjang (terlama dulu) agar tidak partial match
+    sorted_names = sorted(entity_names, key=len, reverse=True)
+
+    for name in sorted_names:
+        if not name:
+            continue
+        escaped = re.escape(name)
+        pattern = r'(?<!\[\[)(?<!\[)' + escaped + r'(?!\])(?!\])'
+        text = re.sub(pattern, f'[[{name}]]', text)
+
+    return text
+
+
+def export_brain_markdown_with_backlinks(conn, output_folder):
+    """Export brain data sebagai file markdown terpisah dengan backlinks.
+
+    Setiap kontak, entri knowledge, note, dan entitas mendapat file .md sendiri
+    dengan frontmatter YAML. Referensi ke entitas lain dalam content diubah
+    menjadi [[Nama]] wiki-style links.
+
+    Struktur output:
+        output_folder/
+        ├── index.md              # Indeks semua entitas
+        ├── graph.md              # Visualisasi relasi knowledge graph
+        ├── contacts/
+        │   ├── Alice Smith.md
+        │   └── Bob Jones.md
+        ├── knowledge/
+        │   └── Project Alpha.md
+        ├── notes/
+        │   └── Meeting Notes.md
+        └── entities/
+            ├── Acme Corp.md
+            └── Project Alpha.md
+
+    Args:
+        conn: Database connection
+        output_folder: Folder tujuan export (akan dibuat jika belum ada)
+
+    Returns:
+        dict dengan statistik export per kategori
+    """
+    from pathlib import Path
+    import json
+    from datetime import datetime
+
+    output = Path(output_folder)
+    output.mkdir(parents=True, exist_ok=True)
+
+    contacts_dir = output / "contacts"
+    knowledge_dir = output / "knowledge"
+    notes_dir = output / "notes"
+    entities_dir = output / "entities"
+    for d in [contacts_dir, knowledge_dir, notes_dir, entities_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    stats = {
+        "contacts": 0,
+        "knowledge": 0,
+        "notes": 0,
+        "entities": 0,
+        "relations": 0,
+    }
+
+    cur = conn.cursor()
+
+    # --- Kontak ---
+    contacts = [dict(r) for r in search_contacts(conn, "", limit=10000)]
+    contact_names = [c['name'] for c in contacts if c.get('name')]
+
+    for c in contacts:
+        name = c.get('name', '(no name)')
+        filename = _sanitize_filename(name) + ".md"
+        filepath = contacts_dir / filename
+
+        lines = []
+        lines.append("---")
+        lines.append(f"title: {name}")
+        lines.append(f"type: contact")
+        if c.get('email'):
+            lines.append(f"email: {c['email']}")
+        if c.get('phone'):
+            lines.append(f"phone: {c['phone']}")
+        if c.get('company'):
+            lines.append(f"company: {c['company']}")
+        if c.get('role'):
+            lines.append(f"role: {c['role']}")
+        if c.get('source'):
+            lines.append(f"source: {c['source']}")
+        lines.append(f"created_at: {c.get('created_at', '')}")
+        lines.append("---")
+        lines.append("")
+
+        if c.get('context_notes'):
+            notes_with_links = _add_backlinks(c['context_notes'], contact_names)
+            lines.append(notes_with_links)
+            lines.append("")
+
+        if c.get('last_interaction'):
+            lines.append(f"Last interaction: {c['last_interaction']}")
+            lines.append("")
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        stats["contacts"] += 1
+
+    # --- Entitas ---
+    cur.execute("SELECT * FROM entities ORDER BY name")
+    entities = [dict(r) for r in cur.fetchall()]
+    entity_names = [e['name'] for e in entities if e.get('name')]
+    all_link_names = contact_names + entity_names
+
+    for e in entities:
+        name = e.get('name', '(no name)')
+        filename = _sanitize_filename(name) + ".md"
+        filepath = entities_dir / filename
+
+        lines = []
+        lines.append("---")
+        lines.append(f"title: {name}")
+        lines.append(f"type: entity")
+        lines.append(f"entity_type: {e.get('entity_type', 'unknown')}")
+        if e.get('source'):
+            lines.append(f"source: {e['source']}")
+        lines.append(f"created_at: {e.get('created_at', '')}")
+        lines.append("---")
+        lines.append("")
+
+        if e.get('context_notes'):
+            notes_with_links = _add_backlinks(e['context_notes'], all_link_names)
+            lines.append(notes_with_links)
+            lines.append("")
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        stats["entities"] += 1
+
+    # --- Entri knowledge ---
+    knowledge = [dict(r) for r in search_knowledge(conn, "", limit=10000)]
+
+    for k in knowledge:
+        title = k.get('title', '(no title)')
+        filename = _sanitize_filename(title) + ".md"
+        filepath = knowledge_dir / filename
+
+        lines = []
+        lines.append("---")
+        lines.append(f"title: {title}")
+        lines.append(f"type: knowledge")
+        lines.append(f"entry_type: {k.get('entry_type', 'unknown')}")
+        if k.get('source'):
+            lines.append(f"source: {k['source']}")
+        lines.append(f"created_at: {k.get('created_at', '')}")
+        lines.append("---")
+        lines.append("")
+
+        content = k.get('content', '')
+        content_with_links = _add_backlinks(content, all_link_names)
+        lines.append(content_with_links)
+        lines.append("")
+
+        if k.get('related_contact_ids'):
+            try:
+                related_ids = json.loads(k['related_contact_ids'])
+                if related_ids:
+                    lines.append("## Related Contacts")
+                    lines.append("")
+                    for rid in related_ids:
+                        cur.execute("SELECT name FROM contacts WHERE id = ?", (rid,))
+                        row = cur.fetchone()
+                        if row:
+                            lines.append(f"- [[{row['name']}]]")
+                    lines.append("")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        stats["knowledge"] += 1
+
+    # --- Notes ---
+    notes = [dict(r) for r in search_notes(conn, "", limit=10000)]
+
+    for n in notes:
+        title = n.get('title') or n.get('filename', '(no title)')
+        filename = _sanitize_filename(title) + ".md"
+        filepath = notes_dir / filename
+
+        lines = []
+        lines.append("---")
+        lines.append(f"title: {title}")
+        lines.append(f"type: note")
+        if n.get('filename'):
+            lines.append(f"file: {n['filename']}")
+        if n.get('tags'):
+            lines.append(f"tags: {n['tags']}")
+        lines.append(f"created_at: {n.get('created_at', '')}")
+        lines.append("---")
+        lines.append("")
+
+        content = n.get('content', '')
+        content_with_links = _add_backlinks(content, all_link_names)
+        lines.append(content_with_links)
+        lines.append("")
+
+        if n.get('summary'):
+            lines.append(f"## Summary")
+            lines.append("")
+            lines.append(n['summary'])
+            lines.append("")
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        stats["notes"] += 1
+
+    # --- Relasi knowledge graph ---
+    cur.execute("""
+        SELECT er.*, s.name AS source_name, t.name AS target_name
+        FROM entity_relations er
+        JOIN entities s ON er.source_entity_id = s.id
+        JOIN entities t ON er.target_entity_id = t.id
+    """)
+    relations = [dict(r) for r in cur.fetchall()]
+    stats["relations"] = len(relations)
+
+    graph_lines = ["# Knowledge Graph", ""]
+    graph_lines.append(f"Exported at: {datetime.utcnow().isoformat()}")
+    graph_lines.append("")
+    graph_lines.append("## Entities")
+    graph_lines.append("")
+    for e in entities:
+        graph_lines.append(f"- [[{e['name']}]] ({e.get('entity_type', 'unknown')})")
+    graph_lines.append("")
+    graph_lines.append("## Relations")
+    graph_lines.append("")
+    for r in relations:
+        graph_lines.append(
+            f"- [[{r['source_name']}]] →{r.get('relation_type', 'related')}→ "
+            f"[[{r['target_name']}]]"
+        )
+    graph_lines.append("")
+
+    with open(output / "graph.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(graph_lines))
+
+    index_lines = ["# Personal Brain Index", ""]
+    index_lines.append(f"Exported at: {datetime.utcnow().isoformat()}")
+    index_lines.append("")
+    index_lines.append("## Contacts")
+    index_lines.append("")
+    for c in contacts:
+        index_lines.append(f"- [[{c['name']}]]")
+    index_lines.append("")
+    index_lines.append("## Entities")
+    index_lines.append("")
+    for e in entities:
+        index_lines.append(f"- [[{e['name']}]] ({e.get('entity_type', 'unknown')})")
+    index_lines.append("")
+    index_lines.append("## Knowledge Entries")
+    index_lines.append("")
+    for k in knowledge:
+        title = k.get('title', '(no title)')
+        index_lines.append(f"- [[{title}]]")
+    index_lines.append("")
+    index_lines.append("## Notes")
+    index_lines.append("")
+    for n in notes:
+        index_lines.append(f"- [[{n.get('title') or n.get('filename', '(no title)')}]]")
+    index_lines.append("")
+
+    with open(output / "index.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(index_lines))
+
+    return stats
+
+
+def import_brain_markdown_with_backlinks(conn, input_folder):
+    """Import brain data dari folder markdown dengan backlinks.
+
+    Membaca file .md dari subfolder contacts/, knowledge/, notes/, entities/
+    dan mengimpornya ke database. Backlinks [[Nama]] dipertahankan sebagai teks.
+
+    Args:
+        conn: Database connection
+        input_folder: Folder yang berisi file markdown export
+
+    Returns:
+        dict dengan statistik import per kategori
+    """
+    from pathlib import Path
+    import re
+
+    input_path = Path(input_folder)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input folder not found: {input_folder}")
+
+    stats = {
+        "contacts": 0,
+        "knowledge": 0,
+        "notes": 0,
+        "entities": 0,
+    }
+
+    cur = conn.cursor()
+
+    entities_dir = input_path / "entities"
+    if entities_dir.exists():
+        for md_file in entities_dir.glob("*.md"):
+            content = md_file.read_text(encoding="utf-8")
+            frontmatter, body = _parse_frontmatter(content)
+            name = frontmatter.get("title", md_file.stem)
+            entity_type = frontmatter.get("entity_type", "concept")
+            source = frontmatter.get("source", "import")
+            context_notes = body.strip() if body.strip() else None
+
+            upsert_entity(
+                conn, name=name, entity_type=entity_type,
+                source=source, context_notes=context_notes,
+            )
+            stats["entities"] += 1
+
+    contacts_dir = input_path / "contacts"
+    if contacts_dir.exists():
+        for md_file in contacts_dir.glob("*.md"):
+            content = md_file.read_text(encoding="utf-8")
+            frontmatter, body = _parse_frontmatter(content)
+            name = frontmatter.get("title", md_file.stem)
+            email = frontmatter.get("email")
+            phone = frontmatter.get("phone")
+            company = frontmatter.get("company")
+            role = frontmatter.get("role")
+            source = frontmatter.get("source", "import")
+            context_notes = body.strip() if body.strip() else None
+
+            upsert_contact(
+                conn, name=name, email=email, phone=phone,
+                company=company, role=role, source=source,
+                context_notes=context_notes,
+            )
+            stats["contacts"] += 1
+
+    knowledge_dir = input_path / "knowledge"
+    if knowledge_dir.exists():
+        for md_file in knowledge_dir.glob("*.md"):
+            content = md_file.read_text(encoding="utf-8")
+            frontmatter, body = _parse_frontmatter(content)
+            title = frontmatter.get("title", md_file.stem)
+            entry_type = frontmatter.get("entry_type", "finding")
+            source = frontmatter.get("source", "import")
+            content_text = body.strip() if body.strip() else ""
+
+            insert_knowledge_entry(
+                conn, entry_type=entry_type, title=title,
+                content=content_text, source=source,
+            )
+            stats["knowledge"] += 1
+
+    notes_dir = input_path / "notes"
+    if notes_dir.exists():
+        for md_file in notes_dir.glob("*.md"):
+            content = md_file.read_text(encoding="utf-8")
+            frontmatter, body = _parse_frontmatter(content)
+            title = frontmatter.get("title", md_file.stem)
+            tags_raw = frontmatter.get("tags", "")
+            tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+            content_text = body.strip() if body.strip() else ""
+
+            upsert_note(
+                conn, filename=md_file.name, file_path=str(md_file),
+                title=title, content=content_text, tags=tags,
+            )
+            stats["notes"] += 1
+
+    return stats
+
+
+def _parse_frontmatter(content):
+    """Parse YAML frontmatter dari markdown content.
+
+    Returns (frontmatter_dict, body_text).
+    """
+    import re
+
+    match = re.match(r'^---\s*\n(.*?)\n---\s*\n(.*)', content, re.DOTALL)
+    if not match:
+        return {}, content
+
+    fm_text = match.group(1)
+    body = match.group(2)
+
+    frontmatter = {}
+    for line in fm_text.split('\n'):
+        if ':' in line:
+            key, _, value = line.partition(':')
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            frontmatter[key] = value
+
+    return frontmatter, body

@@ -104,6 +104,42 @@ All data is stored **locally** on your computer and encrypted at rest with Ferne
 | Voice Integration | `python brain_voice.py --simulate-call "+123****7890"` |
 | Sync Daemon | `python brain_sync_daemon.py --interval 60` |
 
+### Export Markdown dengan Backlinks
+
+Export brain sebagai file markdown terpisah dengan backlinks wiki-style (`[[Nama]]`), kompatibel dengan Obsidian dan tools knowledge graph lainnya.
+
+```bash
+python -c "
+from src.brain_db import get_connection, export_brain_markdown_with_backlinks
+conn = get_connection()
+stats = export_brain_markdown_with_backlinks(conn, 'D:/Project GitHub Brain Memory/brain_export')
+print(stats)
+"
+```
+
+Struktur output:
+```
+brain_export/
+├── index.md              # Indeks semua entitas dengan backlinks
+├── graph.md              # Knowledge graph visual (entitas + relasi)
+├── contacts/             # Satu file .md per kontak
+├── knowledge/            # Satu file .md per entri knowledge
+├── notes/                # Satu file .md per markdown note
+└── entities/             # Satu file .md per entitas knowledge graph
+```
+
+Setiap file memiliki frontmatter YAML (title, type, source, created_at, dll.) dan referensi ke entitas lain secara otomatis diubah menjadi `[[Nama]]` links.
+
+Import kembali:
+```bash
+python -c "
+from src.brain_db import get_connection, import_brain_markdown_with_backlinks
+conn = get_connection()
+stats = import_brain_markdown_with_backlinks(conn, 'D:/Project GitHub Brain Memory/brain_export')
+print(stats)
+"
+```
+
 ### Connecting to MCP remotely via Tailscale
 
 1. Install and log in to Tailscale on both machines
