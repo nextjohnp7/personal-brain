@@ -1,10 +1,14 @@
-"""Brain Sync Daemon - Background process that auto-syncs the notes folder.
-
-Watches D:/Project GitHub Brain Memory/Notes/ for changes and syncs
-new/modified markdown files to brain.db automatically.
+"""Brain Sync Daemon - Background process that auto-syncs notes, Gmail,
+and Google Calendar to brain.db on a schedule.
 
 Run in background:
-    python brain_sync_daemon.py --interval 60
+    python brain_sync_daemon.py --interval 300
+
+Run once and exit:
+    python brain_sync_daemon.py --once
+
+Disable a source:
+    python brain_sync_daemon.py --no-gmail --no-calendar
 """
 
 import sys
@@ -14,7 +18,7 @@ import json
 import argparse
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # Ensure src is importable
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -22,9 +26,18 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from brain_db import (
     get_connection,
     upsert_note,
-    search_notes,
+    upsert_contact,
+    insert_email,
+    upsert_calendar_event,
+    update_contact_interaction,
 )
-from brain_connectors import sync_markdown_notes
+from brain_connectors import (
+    _extract_email,
+    _extract_name,
+    _extract_title,
+    _extract_tags,
+    _summarize,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,9 +53,16 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 NOTES_FOLDER = PROJECT_ROOT / "Notes"
 STATE_FILE = PROJECT_ROOT / ".brain_daemon_state.json"
 
+# Default interval (seconds) - overridable via env
+DEFAULT_INTERVAL = int(os.environ.get("BRAIN_DAEMON_INTERVAL", "300"))
+
+
+# =====================================================================
+# State persistence
+# =====================================================================
 
 def load_state():
-    """Load last sync timestamps per file."""
+    """Load last sync timestamps per source."""
     if STATE_FILE.exists():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -54,8 +74,53 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-def sync_folder_once(conn, folder, state):
-    """Sync only new or modified files since last state."""
+# =====================================================================
+# Google OAuth credentials loader
+# =====================================================================
+
+def load_google_credentials():
+    """Load Google OAuth2 credentials from token file.
+
+    Reads GOOGLE_TOKEN_FILE env var (default: google_token.json).
+    Returns Credentials object or None if not available.
+    """
+    token_file = os.environ.get("GOOGLE_TOKEN_FILE", "google_token.json")
+    token_path = Path(token_file)
+    if not token_path.is_absolute():
+        token_path = PROJECT_ROOT / token_path
+
+    if not token_path.exists():
+        logger.warning(
+            f"Google token file not found: {token_path}. "
+            f"Gmail and Calendar sync will be skipped."
+        )
+        return None
+
+    try:
+        from google.oauth2.credentials import Credentials
+        creds = Credentials.from_authorized_user_file(str(token_path))
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                from google.auth.transport.requests import Request
+                creds.refresh(Request())
+                # Save refreshed token
+                with open(token_path, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+            else:
+                logger.warning("Google credentials invalid or expired")
+                return None
+        return creds
+    except Exception as e:
+        logger.error(f"Failed to load Google credentials: {e}")
+        return None
+
+
+# =====================================================================
+# Notes sync (incremental by file mtime)
+# =====================================================================
+
+def sync_notes_once(conn, folder, state):
+    """Sync only new or modified markdown files since last state."""
     folder = Path(folder)
     if not folder.exists():
         logger.warning(f"Notes folder not found: {folder}")
@@ -71,11 +136,6 @@ def sync_folder_once(conn, folder, state):
 
         try:
             content = md_file.read_text(encoding="utf-8")
-            # Reuse existing logic from brain_connectors
-            import re
-            from brain_connectors import _extract_title, _extract_tags, _summarize
-            from datetime import timezone
-
             title = _extract_title(md_file.stem, content)
             tags = _extract_tags(content)
             summary = _summarize(content)
@@ -95,58 +155,318 @@ def sync_folder_once(conn, folder, state):
             )
             state[file_path] = mtime
             changes += 1
-            logger.info(f"Synced: {md_file.name}")
+            logger.info(f"Synced note: {md_file.name}")
         except Exception as e:
             logger.error(f"Failed to sync {md_file.name}: {e}")
 
     if changes > 0:
         save_state(state)
-        logger.info(f"Sync complete: {changes} file(s) changed")
+        logger.info(f"Notes sync complete: {changes} file(s) changed")
     return state
 
 
-def run_daemon(interval_seconds=60, notes_folder=None):
+# =====================================================================
+# Gmail sync (incremental by last sync timestamp)
+# =====================================================================
+
+def sync_gmail_once(conn, creds, state):
+    """Sync new emails from Gmail since last sync.
+
+    Uses Gmail API 'after:' query to only fetch messages newer than
+    the last successful sync.
+    """
+    from googleapiclient.discovery import build
+
+    service = build("gmail", "v1", credentials=creds)
+    last_sync = state.get("gmail_last_sync")
+
+    # Build query: only messages after last sync
+    if last_sync:
+        try:
+            dt = datetime.fromisoformat(last_sync)
+            unix_ts = int(dt.timestamp())
+            query = f"after:{unix_ts}"
+        except Exception:
+            query = ""
+    else:
+        query = ""
+
+    stats = {"emails": 0, "contacts": 0, "new_messages": 0}
+    newest_date = None
+
+    try:
+        result = service.users().messages().list(
+            userId="me", maxResults=100, q=query
+        ).execute()
+        messages = result.get("messages", [])
+
+        if not messages:
+            logger.info("Gmail: no new messages")
+            return state, stats
+
+        for msg in messages:
+            try:
+                msg_data = service.users().messages().get(
+                    userId="me", id=msg["id"], format="metadata"
+                ).execute()
+
+                headers = {
+                    h["name"]: h["value"]
+                    for h in msg_data["payload"].get("headers", [])
+                }
+                message_id = msg_data.get("id", "")
+                thread_id = msg_data.get("threadId", "")
+                sender = headers.get("From", "")
+                recipient = headers.get("To", "")
+                subject = headers.get("Subject", "")
+                snippet = msg_data.get("snippet", "")
+                received_at = headers.get("Date", "")
+
+                # Track newest received_at for state update
+                if received_at:
+                    if newest_date is None or received_at > newest_date:
+                        newest_date = received_at
+
+                # Extract email from sender
+                sender_email = _extract_email(sender)
+                sender_name = _extract_name(sender)
+
+                # Insert or update contact
+                contact_id = None
+                if sender_email:
+                    contact_id = upsert_contact(
+                        conn, name=sender_name or sender_email,
+                        email=sender_email, source="gmail"
+                    )
+                    update_contact_interaction(conn, contact_id)
+                    stats["contacts"] += 1
+
+                # Insert email (INSERT OR IGNORE handles duplicates)
+                insert_email(
+                    conn, message_id=message_id, thread_id=thread_id,
+                    sender=sender, recipient=recipient, subject=subject,
+                    body=snippet, snippet=snippet, received_at=received_at,
+                    labels=msg_data.get("labelIds", []), contact_id=contact_id
+                )
+                stats["emails"] += 1
+                stats["new_messages"] += 1
+
+            except Exception as e:
+                logger.error(f"Failed to process Gmail message {msg.get('id')}: {e}")
+
+        # Update last sync timestamp
+        if newest_date:
+            state["gmail_last_sync"] = newest_date
+        else:
+            state["gmail_last_sync"] = datetime.now(timezone.utc).isoformat()
+
+        save_state(state)
+        logger.info(
+            f"Gmail sync complete: {stats['new_messages']} new message(s), "
+            f"{stats['contacts']} contact(s)"
+        )
+
+    except Exception as e:
+        logger.error(f"Gmail sync error: {e}")
+
+    return state, stats
+
+
+# =====================================================================
+# Google Calendar sync (incremental by last sync timestamp)
+# =====================================================================
+
+def sync_calendar_once(conn, creds, state):
+    """Sync new calendar events from Google Calendar since last sync."""
+    from googleapiclient.discovery import build
+
+    service = build("calendar", "v3", credentials=creds)
+    last_sync = state.get("calendar_last_sync")
+
+    # timeMin: only events after last sync
+    if last_sync:
+        time_min = last_sync
+    else:
+        # Default: sync events from last 30 days on first run
+        time_min = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+    stats = {"events": 0, "contacts": 0, "new_events": 0}
+    newest_start = None
+
+    try:
+        events_result = service.events().list(
+            calendarId="primary",
+            timeMin=time_min,
+            maxResults=250,
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+        events = events_result.get("items", [])
+
+        if not events:
+            logger.info("Calendar: no new events")
+            return state, stats
+
+        for event in events:
+            try:
+                event_id = event.get("id", "")
+                title = event.get("summary", "(No Title)")
+                description = event.get("description", "")
+                start = event.get("start", {}).get(
+                    "dateTime", event.get("start", {}).get("date", "")
+                )
+                end = event.get("end", {}).get(
+                    "dateTime", event.get("end", {}).get("date", "")
+                )
+                location = event.get("location", "")
+                attendees = event.get("attendees", [])
+                attendee_emails = [
+                    a.get("email", "")
+                    for a in attendees
+                    if a.get("email")
+                ]
+
+                # Track newest start time for state update
+                if start:
+                    if newest_start is None or start > newest_start:
+                        newest_start = start
+
+                # Link to contact (organizer or first attendee)
+                contact_id = None
+                organizer = event.get("organizer", {})
+                organizer_email = organizer.get("email", "")
+                organizer_name = organizer.get("displayName", "")
+
+                if organizer_email:
+                    contact_id = upsert_contact(
+                        conn, name=organizer_name or organizer_email,
+                        email=organizer_email, source="calendar"
+                    )
+                    stats["contacts"] += 1
+                elif attendee_emails:
+                    contact_id = upsert_contact(
+                        conn, name=attendee_emails[0],
+                        email=attendee_emails[0], source="calendar"
+                    )
+
+                upsert_calendar_event(
+                    conn, event_id=event_id, title=title,
+                    description=description, start_time=start, end_time=end,
+                    location=location, attendees=attendee_emails,
+                    contact_id=contact_id,
+                )
+                stats["events"] += 1
+                stats["new_events"] += 1
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to process calendar event {event.get('id')}: {e}"
+                )
+
+        # Update last sync timestamp
+        if newest_start:
+            state["calendar_last_sync"] = newest_start
+        else:
+            state["calendar_last_sync"] = datetime.now(timezone.utc).isoformat()
+
+        save_state(state)
+        logger.info(
+            f"Calendar sync complete: {stats['new_events']} new event(s), "
+            f"{stats['contacts']} contact(s)"
+        )
+
+    except Exception as e:
+        logger.error(f"Calendar sync error: {e}")
+
+    return state, stats
+
+
+# =====================================================================
+# Main daemon loop
+# =====================================================================
+
+def run_cycle(do_notes=True, do_gmail=True, do_calendar=True,
+              notes_folder=None, creds=None, state=None):
+    """Run a single sync cycle across enabled sources.
+
+    Returns updated state dict.
+    """
+    if state is None:
+        state = load_state()
+    if notes_folder is None:
+        notes_folder = os.environ.get(
+            "BRAIN_NOTES_FOLDER", str(NOTES_FOLDER)
+        )
+
+    conn = get_connection()
+    try:
+        if do_notes:
+            logger.info("--- Notes sync ---")
+            state = sync_notes_once(conn, notes_folder, state)
+
+        if do_gmail:
+            if creds is None:
+                logger.warning("Gmail sync skipped: no Google credentials")
+            else:
+                logger.info("--- Gmail sync ---")
+                state, _ = sync_gmail_once(conn, creds, state)
+
+        if do_calendar:
+            if creds is None:
+                logger.warning("Calendar sync skipped: no Google credentials")
+            else:
+                logger.info("--- Calendar sync ---")
+                state, _ = sync_calendar_once(conn, creds, state)
+
+    finally:
+        conn.close()
+
+    return state
+
+
+def run_daemon(interval_seconds=300, do_notes=True, do_gmail=True,
+               do_calendar=True, notes_folder=None):
     """Run the daemon loop."""
     if notes_folder is None:
         notes_folder = os.environ.get(
             "BRAIN_NOTES_FOLDER", str(NOTES_FOLDER)
         )
 
-    logger.info(f"Brain Sync Daemon started")
+    creds = load_google_credentials() if (do_gmail or do_calendar) else None
+
+    logger.info("Brain Sync Daemon started")
     logger.info(f"Notes folder: {notes_folder}")
     logger.info(f"Sync interval: {interval_seconds} seconds")
+    logger.info(f"Sources: notes={do_notes}, gmail={do_gmail}, calendar={do_calendar}")
     logger.info("Press Ctrl+C to stop")
 
     state = load_state()
-    conn = get_connection()
 
     try:
         while True:
             try:
-                state = sync_folder_once(conn, notes_folder, state)
+                state = run_cycle(
+                    do_notes=do_notes, do_gmail=do_gmail,
+                    do_calendar=do_calendar, notes_folder=notes_folder,
+                    creds=creds, state=state,
+                )
             except Exception as e:
                 logger.error(f"Sync cycle error: {e}")
             time.sleep(interval_seconds)
     except KeyboardInterrupt:
         logger.info("Daemon stopped by user")
-    finally:
-        conn.close()
 
 
-def run_once(notes_folder=None):
+def run_once(do_notes=True, do_gmail=True, do_calendar=True,
+             notes_folder=None):
     """Run a single sync cycle and exit."""
-    if notes_folder is None:
-        notes_folder = os.environ.get(
-            "BRAIN_NOTES_FOLDER", str(NOTES_FOLDER)
-        )
-
-    conn = get_connection()
-    try:
-        state = load_state()
-        state = sync_folder_once(conn, notes_folder, state)
-        logger.info("Single sync complete")
-    finally:
-        conn.close()
+    creds = load_google_credentials() if (do_gmail or do_calendar) else None
+    state = run_cycle(
+        do_notes=do_notes, do_gmail=do_gmail,
+        do_calendar=do_calendar, notes_folder=notes_folder,
+        creds=creds,
+    )
+    logger.info("Single sync complete")
 
 
 if __name__ == "__main__":
@@ -154,8 +474,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--interval",
         type=int,
-        default=60,
-        help="Sync interval in seconds (default: 60)",
+        default=DEFAULT_INTERVAL,
+        help="Sync interval in seconds (default: 300)",
     )
     parser.add_argument(
         "--once",
@@ -168,9 +488,35 @@ if __name__ == "__main__":
         default=None,
         help="Notes folder path (default: BRAIN_NOTES_FOLDER env or ./Notes)",
     )
+    parser.add_argument(
+        "--no-notes",
+        action="store_true",
+        help="Skip notes folder sync",
+    )
+    parser.add_argument(
+        "--no-gmail",
+        action="store_true",
+        help="Skip Gmail sync",
+    )
+    parser.add_argument(
+        "--no-calendar",
+        action="store_true",
+        help="Skip Google Calendar sync",
+    )
     args = parser.parse_args()
 
     if args.once:
-        run_once(args.folder)
+        run_once(
+            do_notes=not args.no_notes,
+            do_gmail=not args.no_gmail,
+            do_calendar=not args.no_calendar,
+            notes_folder=args.folder,
+        )
     else:
-        run_daemon(args.interval, args.folder)
+        run_daemon(
+            interval_seconds=args.interval,
+            do_notes=not args.no_notes,
+            do_gmail=not args.no_gmail,
+            do_calendar=not args.no_calendar,
+            notes_folder=args.folder,
+        )
