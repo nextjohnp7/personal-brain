@@ -93,6 +93,7 @@ def get_connection():
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row
         _create_tables(conn)
+        _create_access_control_tables(conn)
         return conn
 
     # Encrypted mode: decrypt to temp file, open SQLite, re-encrypt on close
@@ -114,6 +115,7 @@ def get_connection():
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
     if not cur.fetchone():
         _create_tables(conn)
+        _create_access_control_tables(conn)
 
     # Register cleanup metadata and wrap connection
     secure_conn = _SecureConnection(conn, tmp_path, fernet, ENCRYPTED_PATH)
@@ -1378,3 +1380,286 @@ def consolidate_memory(conn, max_conversation_age_days=30,
 
     conn.commit()
     return stats
+
+
+# =====================================================================
+# Users & Access Control (Sharing)
+# =====================================================================
+
+def _ensure_access_control_columns(conn):
+    """Add owner_user_id to existing tables if missing (idempotent)."""
+    cur = conn.cursor()
+
+    # contacts
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(contacts)").fetchall()}
+    if "owner_user_id" not in cols:
+        cur.execute("ALTER TABLE contacts ADD COLUMN owner_user_id TEXT")
+
+    # knowledge_entries
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(knowledge_entries)").fetchall()}
+    if "owner_user_id" not in cols:
+        cur.execute("ALTER TABLE knowledge_entries ADD COLUMN owner_user_id TEXT")
+
+    # entity_relations
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(entity_relations)").fetchall()}
+    if "owner_user_id" not in cols:
+        cur.execute("ALTER TABLE entity_relations ADD COLUMN owner_user_id TEXT")
+
+    # notes
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(notes)").fetchall()}
+    if "owner_user_id" not in cols:
+        cur.execute("ALTER TABLE notes ADD COLUMN owner_user_id TEXT")
+
+    conn.commit()
+
+
+def _create_access_control_tables(conn):
+    """Create users and item_shares tables."""
+    cur = conn.cursor()
+
+    # Users
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT,
+            password_hash TEXT,
+            role TEXT DEFAULT 'user',  -- 'user', 'admin'
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Item shares — who can access which item
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS item_shares (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_type TEXT NOT NULL,   -- 'contact', 'knowledge', 'entity_relation', 'note'
+            item_id INTEGER NOT NULL,
+            owner_user_id TEXT NOT NULL,
+            shared_with_user_id TEXT NOT NULL,
+            access_level TEXT DEFAULT 'read',  -- 'read', 'write', 'admin'
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(item_type, item_id, shared_with_user_id)
+        )
+    """)
+
+    conn.commit()
+    _ensure_access_control_columns(conn)
+
+
+def create_user(conn, user_id, username, email=None, password_hash=None, role='user'):
+    """Create a new user."""
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute("""
+        INSERT OR REPLACE INTO users
+        (id, username, email, password_hash, role, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, username, email, password_hash, role, now, now))
+    conn.commit()
+    return user_id
+
+
+def get_user(conn, user_id):
+    """Get user by ID."""
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_username(conn, username):
+    """Get user by username."""
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def share_item(conn, item_type, item_id, owner_user_id, shared_with_user_id, access_level='read'):
+    """Share an item with another user."""
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute("""
+        INSERT OR REPLACE INTO item_shares
+        (item_type, item_id, owner_user_id, shared_with_user_id, access_level, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (item_type, item_id, owner_user_id, shared_with_user_id, access_level, now))
+    conn.commit()
+    return cur.lastrowid
+
+
+def unshare_item(conn, item_type, item_id, shared_with_user_id):
+    """Remove sharing of an item with a user."""
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM item_shares
+        WHERE item_type = ? AND item_id = ? AND shared_with_user_id = ?
+    """, (item_type, item_id, shared_with_user_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_accessible_items(conn, user_id, item_type, limit=1000):
+    """Get items accessible to a user (owned + shared).
+
+    Returns list of dicts with item data plus 'access_level' field.
+    """
+    cur = conn.cursor()
+
+    # Map item_type to table name
+    table_map = {
+        'contact': 'contacts',
+        'knowledge': 'knowledge_entries',
+        'entity_relation': 'entity_relations',
+        'note': 'notes',
+    }
+    table = table_map.get(item_type)
+    if not table:
+        return []
+
+    # Owned items
+    cur.execute(f"""
+        SELECT *, 'owner' as access_level
+        FROM {table}
+        WHERE owner_user_id = ?
+    """, (user_id,))
+    owned = [dict(r) for r in cur.fetchall()]
+
+    # Shared items
+    cur.execute("""
+        SELECT s.item_id, s.access_level
+        FROM item_shares s
+        WHERE s.item_type = ? AND s.shared_with_user_id = ?
+    """, (item_type, user_id))
+    shared_rows = cur.fetchall()
+
+    shared_items = []
+    for sr in shared_rows:
+        access_level = sr['access_level']
+        cur.execute(f"SELECT * FROM {table} WHERE id = ?", (sr['item_id'],))
+        row = cur.fetchone()
+        if row:
+            item = dict(row)
+            item['access_level'] = access_level
+            shared_items.append(item)
+
+    # Combine, dedupe by id
+    all_items = {}
+    for item in owned + shared_items:
+        all_items[item['id']] = item
+
+    return list(all_items.values())[:limit]
+
+
+def check_item_access(conn, user_id, item_type, item_id, required_level='read'):
+    """Check if user has access to an item.
+
+    Returns access_level string if access granted, None if denied.
+    """
+    # Owner always has admin access
+    table_map = {
+        'contact': 'contacts',
+        'knowledge': 'knowledge_entries',
+        'entity_relation': 'entity_relations',
+        'note': 'notes',
+    }
+    table = table_map.get(item_type)
+    if not table:
+        return None
+
+    cur = conn.cursor()
+    cur.execute(f"SELECT owner_user_id FROM {table} WHERE id = ?", (item_id,))
+    row = cur.fetchone()
+    if row and row['owner_user_id'] == user_id:
+        return 'admin'
+
+    # Check shares
+    level_map = {'read': 1, 'write': 2, 'admin': 3}
+    required_level_num = level_map.get(required_level, 1)
+
+    cur.execute("""
+        SELECT access_level FROM item_shares
+        WHERE item_type = ? AND item_id = ? AND shared_with_user_id = ?
+    """, (item_type, item_id, user_id))
+    row = cur.fetchone()
+    if row:
+        user_level_num = level_map.get(row['access_level'], 1)
+        if user_level_num >= required_level_num:
+            return row['access_level']
+
+    return None
+
+
+def upsert_contact_with_owner(conn, name, email=None, phone=None, company=None, role=None,
+                              source='manual', context_notes=None, owner_user_id=None):
+    """Insert or update a contact with owner tracking."""
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    # Search for existing contact by email or name
+    cur.execute("SELECT id FROM contacts WHERE email = ? OR name = ?", (email, name))
+    row = cur.fetchone()
+
+    if row:
+        contact_id = row['id']
+        cur.execute("""
+            UPDATE contacts
+            SET phone = COALESCE(?, phone),
+                company = COALESCE(?, company),
+                role = COALESCE(?, role),
+                source = COALESCE(?, source),
+                context_notes = COALESCE(?, context_notes),
+                owner_user_id = COALESCE(?, owner_user_id),
+                updated_at = ?
+            WHERE id = ?
+        """, (phone, company, role, source, context_notes, owner_user_id, now, contact_id))
+    else:
+        cur.execute("""
+            INSERT INTO contacts (name, email, phone, company, role, source,
+                                  context_notes, last_interaction, owner_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, email, phone, company, role, source, context_notes, now, owner_user_id))
+        contact_id = cur.lastrowid
+        # Catat provenance untuk kontak baru
+        add_provenance(conn, 'contact', contact_id, source,
+                       source_detail=f'created: {name}', confidence=1.0)
+
+    conn.commit()
+    return contact_id
+
+
+def upsert_note_with_owner(conn, filename, file_path, title, content, summary=None,
+                           tags=None, last_modified=None, owner_user_id=None):
+    """Insert or update a note with owner tracking."""
+    cur = conn.cursor()
+    tags_json = json.dumps(tags or [])
+    now = datetime.utcnow().isoformat()
+    cur.execute("SELECT id FROM notes WHERE file_path = ?", (file_path,))
+    row = cur.fetchone()
+
+    if row:
+        note_id = row['id']
+        cur.execute("""
+            UPDATE notes
+            SET title = COALESCE(?, title),
+                content = COALESCE(?, content),
+                summary = COALESCE(?, summary),
+                tags = COALESCE(?, tags),
+                last_modified = COALESCE(?, last_modified),
+                owner_user_id = COALESCE(?, owner_user_id),
+                updated_at = ?
+            WHERE id = ?
+        """, (title, content, summary, tags_json, last_modified, owner_user_id, now, note_id))
+    else:
+        cur.execute("""
+            INSERT INTO notes
+            (filename, file_path, title, content, summary, tags,
+             last_modified, created_at, updated_at, owner_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (filename, file_path, title, content, summary, tags_json,
+              last_modified, now, now, owner_user_id))
+        note_id = cur.lastrowid
+
+    conn.commit()
+    return note_id
