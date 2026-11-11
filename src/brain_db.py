@@ -11,6 +11,9 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
+from brain_encryption import get_connection as _get_secure_connection, migrate_plaintext_to_encrypted
+from brain_embeddings import embed_text, cosine_similarity as _cosine_similarity
+
 # Database location at project root
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 DB_PATH = PROJECT_ROOT / "brain.db"
@@ -412,75 +415,18 @@ def global_search(conn, query, limit=10):
 
 
 # =====================================================================
-# Embeddings for Semantic Search (TF-IDF, no external dependencies)
+# Embeddings for Semantic Search (real sentence-transformers embeddings)
 # =====================================================================
 
-def _tokenize(text):
-    """Simple tokenizer: lowercase, split on non-alphanumeric."""
-    import re
-    return [t for t in re.split(r'[^a-z0-9]+', text.lower()) if t]
-
-
-def _compute_tfidf(tokens, all_token_lists):
-    """Compute TF-IDF vector for a token list given a corpus of token lists."""
-    import math
-    from collections import Counter
-
-    # Term frequency for this document
-    tf = Counter(tokens)
-    total = len(tokens)
-    if total == 0:
-        return {}
-
-    # Document frequency across corpus
-    df = Counter()
-    for doc_tokens in all_token_lists:
-        df.update(set(doc_tokens))
-
-    n_docs = len(all_token_lists)
-    vector = {}
-    for term, count in tf.items():
-        tf_val = count / total
-        idf_val = math.log(n_docs / (1 + df[term])) + 1.0
-        vector[term] = tf_val * idf_val
-    return vector
-
-
-def _cosine_similarity(vec_a, vec_b):
-    """Cosine similarity between two sparse vectors (dicts)."""
-    import math
-    if not vec_a or not vec_b:
-        return 0.0
-    dot = sum(vec_a.get(k, 0) * vec_b.get(k, 0) for k in set(vec_a) | set(vec_b))
-    norm_a = math.sqrt(sum(v * v for v in vec_a.values()))
-    norm_b = math.sqrt(sum(v * v for v in vec_b.values()))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
 def store_embedding(conn, source_type, source_id, content_chunk):
-    """Compute and store a TF-IDF embedding for a content chunk."""
-    tokens = _tokenize(content_chunk)
+    """Compute and store a real embedding for a content chunk.
 
-    # Get all existing chunks to compute IDF
+    Uses sentence-transformers/all-MiniLM-L6-v2 (384-dim).
+    Falls back to TF-IDF if model unavailable.
+    """
+    vector = embed_text(content_chunk)
+
     cur = conn.cursor()
-    cur.execute("SELECT content_chunk FROM embeddings")
-    existing_chunks = [row[0] for row in cur.fetchall()]
-    all_token_lists = [_tokenize(c) for c in existing_chunks] + [tokens]
-
-    vector = _compute_tfidf(tokens, all_token_lists)
-
-    # Recompute all embeddings since IDF changed (simple approach for small corpus)
-    cur.execute("SELECT id, content_chunk FROM embeddings")
-    for row in cur.fetchall():
-        chunk_tokens = _tokenize(row[1])
-        chunk_vector = _compute_tfidf(chunk_tokens, all_token_lists)
-        cur.execute(
-            "UPDATE embeddings SET embedding_json = ? WHERE id = ?",
-            (json.dumps(chunk_vector), row[0])
-        )
-
     cur.execute(
         "INSERT INTO embeddings (source_type, source_id, content_chunk, embedding_json) "
         "VALUES (?, ?, ?, ?)",
@@ -491,34 +437,28 @@ def store_embedding(conn, source_type, source_id, content_chunk):
 
 
 def semantic_search(conn, query, limit=10):
-    """Semantic search using TF-IDF + cosine similarity.
+    """Semantic search using real embeddings + cosine similarity.
 
     Returns list of dicts with source_type, source_id, content_chunk, similarity.
     """
-    import math
-    from collections import Counter
+    query_vector = embed_text(query)
 
-    query_tokens = _tokenize(query)
-
-    # Get all embeddings with their vectors
     cur = conn.cursor()
-    cur.execute("SELECT id, source_type, source_id, content_chunk, embedding_json FROM embeddings")
+    cur.execute(
+        "SELECT id, source_type, source_id, content_chunk, embedding_json FROM embeddings"
+    )
     rows = cur.fetchall()
 
     if not rows:
         return []
 
-    # Recompute IDF with query included
-    all_chunks = [r[3] for r in rows] + [query]
-    all_token_lists = [_tokenize(c) for c in all_chunks]
-
-    query_vector = _compute_tfidf(query_tokens, all_token_lists)
-
     results = []
     for row in rows:
-        vec = json.loads(row[4]) if row[4] else {}
-        sim = _cosine_similarity(query_vector, vec)
-        if sim > 0:
+        stored_vec = json.loads(row[4]) if row[4] else []
+        if not stored_vec:
+            continue
+        sim = _cosine_similarity(query_vector, stored_vec)
+        if sim > 0.1:  # threshold for real embeddings
             results.append({
                 "id": row[0],
                 "source_type": row[1],
