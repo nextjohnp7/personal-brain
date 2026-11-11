@@ -33,10 +33,11 @@ Required for encryption:
 Optional but recommended:
 - `BRAIN_DASHBOARD_USER` and `BRAIN_DASHBOARD_PASSWORD` — web dashboard login
 - `BRAIN_API_KEY` — API key for web API endpoints
-- `BRAIN_MCP_API_KEY` — API key for MCP server access
+- `BRAIN_MCP_API_KEY` — API key for MCP server access (required for remote access)
 - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` — from Google Cloud Console (for Gmail + Calendar)
 - `TWITTER_BEARER_TOKEN` — from developer.twitter.com (for Twitter/X)
 - `BRAIN_NOTES_FOLDER` — path to your markdown notes folder
+- `TAILSCALE_ENABLED` — set to `true` if using Tailscale for remote MCP access
 
 ### 2. Install Python dependencies
 
@@ -44,7 +45,21 @@ Optional but recommended:
 pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client requests flask cryptography "mcp<2"
 ```
 
-### 3. Run initial sync
+### 3. Install Tailscale (for remote MCP access)
+
+Tailscale creates a private VPN so you can access your MCP server from any device without opening ports on your router.
+
+```bash
+# Download and install Tailscale: https://tailscale.com/download
+# After installation, log in:
+tailscale up
+
+# Get your Tailscale IP:
+tailscale ip -4
+# Example output: 100.x.y.z
+```
+
+### 4. Run initial sync
 
 ```bash
 cd src
@@ -83,12 +98,30 @@ All data is stored **locally** on your computer and encrypted at rest with Ferne
 | Component | Command |
 |-----------|---------|
 | Web Dashboard | `python brain_web_dashboard.py --port 5000` |
-| MCP Server | `python brain_mcp_server.py --stdio` or `--http --port 8765` |
+| MCP Server (local) | `python brain_mcp_server.py --stdio` |
+| MCP Server (HTTP, Tailscale) | `python brain_mcp_server.py --http --port 8765` |
+| MCP Server (auto Tailscale IP) | `python brain_mcp_server.py --tailscale --port 8765` |
 | Voice Integration | `python brain_voice.py --simulate-call "+123****7890"` |
 | Sync Daemon | `python brain_sync_daemon.py --interval 60` |
+
+### Connecting to MCP remotely via Tailscale
+
+1. Install and log in to Tailscale on both machines
+2. On the brain machine, start MCP server:
+   ```bash
+   python brain_mcp_server.py --tailscale --port 8765
+   ```
+   Or manually: `python brain_mcp_server.py --http --host 0.0.0.0 --port 8765`
+3. From another machine on your Tailscale network, connect to:
+   ```
+   http://<tailscale-ip>:8765/mcp
+   ```
+   (Replace `<tailscale-ip>` with your Tailscale IP, e.g., `100.x.y.z`)
+4. Set `BRAIN_MCP_API_KEY` in `.env` and pass it as the `api_key` parameter in every MCP tool call.
 
 ## Security
 
 - **Encryption at rest**: `brain.db.enc` is encrypted with Fernet (AES-128-CBC + HMAC). Plaintext never touches disk.
 - **Dashboard auth**: Login with `BRAIN_DASHBOARD_USER` / `BRAIN_DASHBOARD_PASSWORD` (hashed with werkzeug).
 - **API key**: `BRAIN_API_KEY` for web API, `BRAIN_MCP_API_KEY` for MCP server access.
+- **Tailscale**: MCP server binds to `0.0.0.0` by default but is only reachable within your private Tailscale network. Never expose port 8765 to the public internet without a firewall.

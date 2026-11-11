@@ -10,6 +10,7 @@ Run:
 
 import sys
 import os
+import subprocess
 import argparse
 import logging
 from pathlib import Path
@@ -313,6 +314,25 @@ def brain_knowledge_graph(name: str, limit: int = 10, api_key: str = "") -> str:
         conn.close()
 
 
+def get_tailscale_ip():
+    """Detect Tailscale IP address (100.x.y.z) if Tailscale is running.
+
+    Returns the first Tailscale IP found, or None.
+    """
+    try:
+        result = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip()
+            if ip:
+                return ip
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Brain MCP Server")
     parser.add_argument(
@@ -323,7 +343,13 @@ def main():
     parser.add_argument(
         "--http",
         action="store_true",
-        help="Use HTTP transport (for remote access)",
+        help="Use HTTP transport (for remote access via Tailscale)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="HTTP bind host (default: 0.0.0.0 for Tailscale remote access)",
     )
     parser.add_argument(
         "--port",
@@ -331,11 +357,31 @@ def main():
         default=8765,
         help="HTTP port (default: 8765)",
     )
+    parser.add_argument(
+        "--tailscale",
+        action="store_true",
+        help="Auto-detect Tailscale IP and bind to it (implies --http)",
+    )
     args = parser.parse_args()
 
+    # Determine bind host
+    host = args.host
+    if args.tailscale:
+        ts_ip = get_tailscale_ip()
+        if ts_ip:
+            host = ts_ip
+            logger.info(f"Tailscale IP detected: {ts_ip}")
+        else:
+            logger.warning(
+                "Tailscale not found or not running. Falling back to 0.0.0.0"
+            )
+            host = "0.0.0.0"
+        args.http = True  # tailscale implies HTTP
+
     if args.http:
-        logger.info(f"Starting Brain MCP Server on HTTP port {args.port}")
-        mcp.run(transport="http", host="127.0.0.1", port=args.port)
+        logger.info(f"Starting Brain MCP Server on HTTP {host}:{args.port}")
+        logger.info(f"Tailscale clients can connect at: {host}:{args.port}")
+        mcp.run(transport="http", host=host, port=args.port)
     else:
         # Default to stdio for local agent integration
         logger.info("Starting Brain MCP Server on stdio")
