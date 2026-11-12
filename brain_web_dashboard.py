@@ -39,10 +39,10 @@ from brain_db import (
     query_knowledge_graph,
     upsert_contact,
     update_contact,
-    delete_contact,
+    delete_contact as delete_contact_db,
     upsert_note,
     update_note,
-    delete_note,
+    delete_note as delete_note_db,
     insert_knowledge_entry,
     update_knowledge_entry,
     delete_knowledge_entry,
@@ -234,10 +234,10 @@ def edit_contact(contact_id):
 
 @app.route("/contacts/<int:contact_id>/delete", methods=["POST"])
 @require_login
-def delete_contact_route(contact_id):
+def delete_contact(contact_id):
     conn = get_conn()
     try:
-        if delete_contact(conn, contact_id):
+        if delete_contact_db(conn, contact_id):
             flash("Contact deleted successfully", "success")
         else:
             flash("Contact not found", "error")
@@ -317,10 +317,10 @@ def edit_note(note_id):
 
 @app.route("/notes/<int:note_id>/delete", methods=["POST"])
 @require_login
-def delete_note_route(note_id):
+def delete_note(note_id):
     conn = get_conn()
     try:
-        if delete_note(conn, note_id):
+        if delete_note_db(conn, note_id):
             flash("Note deleted successfully", "success")
         else:
             flash("Note not found", "error")
