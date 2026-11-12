@@ -1,30 +1,29 @@
-# PR Details — Prioritas 3: Stable embedding hashing (High)
+# PR Details — Prioritas 4: Attention-mask pooling (High)
 
 ## Commit
-`[pending]` — `fix(prioritas3): Stable embedding hashing`
+`[pending]` — `fix(prioritas4): Attention-mask-aware pooling`
 
 ## Ringkasan Perubahan
-- `src/brain_embeddings.py`: Sudah menggunakan `hashlib.md5` via
-  `_stable_hash()` (tidak ada `hash()` built-in di kode) —
-  verifikasi konfirmasi tidak ada penggunaan `hash()` di src/
+- `src/brain_embeddings.py`: Sudah menggunakan `_mean_pool_with_attention_mask()`
+  yang weight token embeddings by attention_mask sebelum averaging —
+  tidak ada bare `outputs.last_hidden_state.mean(dim=1)` (verifikasi
+  konfirmasi kode sudah benar)
 - `tests/test_security.py`:
-  * `test_stable_hash_deterministic` — _stable_hash menghasilkan nilai
-    yang sama untuk input yang sama, dalam range [0, dim)
-  * `test_tfidf_embed_deterministic` — _tfidf_embed menghasilkan vektor
-    yang sama untuk teks yang sama, vektor nol untuk teks kosong
+  * `test_attention_mask_pooling_ignores_padding` — verifikasi pooling
+    mengabaikan padding token (skip jika torch tidak tersedia)
 
 ## Files Diubah
 | File | Perubahan |
 |------|-----------|
-| `tests/test_security.py` | 2 tes stable embedding hashing |
+| `tests/test_security.py` | 1 tes attention-mask pooling (skip tanpa torch) |
 
 ## Test Result
-84/84 test lulus (lokal)
+84 passed, 1 skipped (lokal)
 
 ## Verifikasi
-- Tidak ada `hash()` built-in di `src/` ✓
-- `_stable_hash` menggunakan `hashlib.md5(token).digest()[:4]` ✓
-- Vektor deterministik across repeated calls ✓
+- `_mean_pool_with_attention_mask` multiply token embeddings by mask ✓
+- `sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)` mencegah div-by-zero ✓
+- Tidak ada bare `last_hidden_state.mean(dim=1)` ✓
 
 ## Status
-Prioritas 3 — Stable embedding hashing SELESAI. Siap untuk review dan merge ke `main`.
+Prioritas 4 — Attention-mask pooling SELESAI. Siap untuk review dan merge ke `main`.

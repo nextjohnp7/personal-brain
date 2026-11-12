@@ -19,6 +19,34 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 DB_PATH = PROJECT_ROOT / "brain.db.enc"
 ENCRYPTED_PATH = PROJECT_ROOT / "brain.db.enc"
 
+
+def _relevance_score(row: dict, query: str, title_fields: tuple, body_fields: tuple) -> float:
+    """Compute a simple relevance score (0.0 to 1.0) for a search result.
+
+    Title/name field matches score higher than body/content field matches.
+    Exact match scores higher than substring match.
+    """
+    q = query.strip().lower()
+    if not q:
+        return 0.0
+
+    score = 0.0
+    for field in title_fields:
+        val = str(row.get(field, '') or '').lower()
+        if q == val:
+            score += 1.0  # exact title match
+        elif q in val:
+            score += 0.7  # title substring match
+        elif val.startswith(q):
+            score += 0.5  # title starts with query
+    for field in body_fields:
+        val = str(row.get(field, '') or '').lower()
+        if q == val:
+            score += 0.5  # exact body match
+        elif q in val:
+            score += 0.3  # body substring match
+    return min(score, 1.0)
+
 # Allowlist of characters permitted in table names (defense-in-depth for
 # f-string SQL). Only [a-zA-Z_][a-zA-Z0-9_]* is accepted — no SQL keywords,
 # no quotes, no semicolons, no comments.
@@ -127,7 +155,11 @@ def get_contact(conn, contact_id):
 
 
 def search_contacts(conn, query, limit=20, offset=0):
-    """Search contacts by name, email, or notes."""
+    """Search contacts by name, email, or company.
+
+    Results are ranked by relevance (exact/name match > substring match).
+    Returns list of sqlite3.Row with an added ``_relevance`` key.
+    """
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
@@ -136,7 +168,19 @@ def search_contacts(conn, query, limit=20, offset=0):
         ORDER BY name
         LIMIT ? OFFSET ?
     """, (like, like, like, like, limit, offset))
-    return cur.fetchall()
+    rows = cur.fetchall()
+    # Attach relevance score and sort by it (descending)
+    scored = []
+    for r in rows:
+        d = dict(r)
+        d['_relevance'] = _relevance_score(
+            d, query,
+            title_fields=('name',),
+            body_fields=('email', 'company', 'context_notes'),
+        )
+        scored.append(d)
+    scored.sort(key=lambda x: x['_relevance'], reverse=True)
+    return scored
 
 
 def count_contacts(conn, query=""):
@@ -228,7 +272,11 @@ def clear_failed_gmail_message(conn, message_id):
 
 
 def search_emails(conn, query, limit=20, offset=0):
-    """Search emails by subject, body, sender, or recipient."""
+    """Search emails by subject, body, sender, or recipient.
+
+    Results are ranked by relevance (subject match > body/sender match).
+    Returns list of dicts with an added ``_relevance`` key.
+    """
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
@@ -237,7 +285,18 @@ def search_emails(conn, query, limit=20, offset=0):
         ORDER BY received_at DESC
         LIMIT ? OFFSET ?
     """, (like, like, like, like, limit, offset))
-    return cur.fetchall()
+    rows = cur.fetchall()
+    scored = []
+    for r in rows:
+        d = dict(r)
+        d['_relevance'] = _relevance_score(
+            d, query,
+            title_fields=('subject',),
+            body_fields=('sender', 'recipient', 'body', 'snippet'),
+        )
+        scored.append(d)
+    scored.sort(key=lambda x: x['_relevance'], reverse=True)
+    return scored
 
 
 def count_emails(conn, query=""):
@@ -291,17 +350,42 @@ def upsert_calendar_event(conn, event_id, title, description, start_time, end_ti
     return cur.lastrowid
 
 
-def get_upcoming_events(conn, limit=10, offset=0):
-    """Retrieve upcoming calendar events."""
+def get_upcoming_events(conn, limit=10, offset=0, query=''):
+    """Retrieve upcoming calendar events.
+
+    If ``query`` is provided, filter events whose title or description
+    match the query (relevance-ranked). Otherwise returns the next
+    ``limit`` upcoming events ordered by start time.
+    """
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM calendar_events
-        WHERE start_time >= ?
-        ORDER BY start_time ASC
-        LIMIT ? OFFSET ?
-    """, (now, limit, offset))
-    return cur.fetchall()
+    if query:
+        like = f"%{query}%"
+        cur.execute("""
+            SELECT * FROM calendar_events
+            WHERE start_time >= ? AND (title LIKE ? OR description LIKE ?)
+            ORDER BY start_time ASC
+            LIMIT ? OFFSET ?
+        """, (now, like, like, limit, offset))
+    else:
+        cur.execute("""
+            SELECT * FROM calendar_events
+            WHERE start_time >= ?
+            ORDER BY start_time ASC
+            LIMIT ? OFFSET ?
+        """, (now, limit, offset))
+    rows = cur.fetchall()
+    scored = []
+    for r in rows:
+        d = dict(r)
+        d['_relevance'] = _relevance_score(
+            d, query,
+            title_fields=('title',),
+            body_fields=('description', 'location'),
+        )
+        scored.append(d)
+    scored.sort(key=lambda x: x['_relevance'], reverse=True)
+    return scored
 
 
 def count_events(conn):
@@ -358,7 +442,11 @@ def upsert_note(conn, filename, file_path, title, content, summary=None,
 
 
 def search_notes(conn, query, limit=20, offset=0):
-    """Search notes by title, content, or tags."""
+    """Search notes by title, content, or tags.
+
+    Results are ranked by relevance (title match > content/tags match).
+    Returns list of dicts with an added ``_relevance`` key.
+    """
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
@@ -367,7 +455,18 @@ def search_notes(conn, query, limit=20, offset=0):
         ORDER BY updated_at DESC
         LIMIT ? OFFSET ?
     """, (like, like, like, limit, offset))
-    return cur.fetchall()
+    rows = cur.fetchall()
+    scored = []
+    for r in rows:
+        d = dict(r)
+        d['_relevance'] = _relevance_score(
+            d, query,
+            title_fields=('title',),
+            body_fields=('content', 'tags'),
+        )
+        scored.append(d)
+    scored.sort(key=lambda x: x['_relevance'], reverse=True)
+    return scored
 
 
 def count_notes(conn, query=""):
@@ -413,7 +512,18 @@ def search_knowledge(conn, query, limit=20, offset=0):
         ORDER BY created_at DESC
         LIMIT ? OFFSET ?
     """, (like, like, limit, offset))
-    return cur.fetchall()
+    rows = cur.fetchall()
+    scored = []
+    for r in rows:
+        d = dict(r)
+        d['_relevance'] = _relevance_score(
+            d, query,
+            title_fields=('title',),
+            body_fields=('content',),
+        )
+        scored.append(d)
+    scored.sort(key=lambda x: x['_relevance'], reverse=True)
+    return scored
 
 
 def count_knowledge(conn, query=""):

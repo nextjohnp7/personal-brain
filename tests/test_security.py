@@ -270,4 +270,123 @@ def test_tfidf_embed_deterministic():
     assert v_empty == [0.0] * be._embedding_dim
 
 
+# ---------- Prioritas 4 — Attention-mask pooling ----------
+def test_attention_mask_pooling_ignores_padding():
+    """P4-01: _mean_pool_with_attention_mask harus mengabaikan token
+    padding (attention_mask=0) sehingga vektor tidak terpengaruh oleh
+    panjang sequence yang berbeda untuk teks yang sama."""
+    torch = pytest.importorskip("torch")
+
+    import src.brain_embeddings as be
+
+    # Simulasi outputs dengan 2 token, dim=4
+    class FakeOutputs:
+        last_hidden_state = torch.tensor([[[1.0, 0.0, 0.0, 0.0],
+                                            [0.0, 1.0, 0.0, 0.0]]])
+
+    # Token 1 aktif, token 2 adalah padding
+    mask_active = torch.tensor([[1, 0]])
+    mask_both = torch.tensor([[1, 1]])
+
+    pooled_active = be._mean_pool_with_attention_mask(FakeOutputs(), mask_active)
+    pooled_both = be._mean_pool_with_attention_mask(FakeOutputs(), mask_both)
+
+    # Hasil dengan padding diabaikan harus sama seperti hanya 1 token aktif
+    expected_active = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    expected_both = torch.tensor([[0.5, 0.5, 0.0, 0.0]])
+
+    assert torch.allclose(pooled_active, expected_active), \
+        f"Pooling dengan mask=[1,0] salah: {pooled_active}"
+    assert torch.allclose(pooled_both, expected_both), \
+        f"Pooling dengan mask=[1,1] salah: {pooled_both}"
+
+    # Kedua hasil harus berbeda (padding memang mempengaruhi bare mean)
+    assert not torch.allclose(pooled_active, pooled_both), \
+        "Pooling dengan dan tanpa padding harus berbeda"
+
+
+# ---------- Prioritas 5 — MCP search relevance ----------
+def test_search_contacts_ranked_by_relevance(db_mode):
+    """P5-01: Kontak yang cocok di nama (title) harus muncul sebelum yang
+    cocok hanya di email/notes (body)."""
+    conn = db_mode.get_connection()
+    try:
+        db_mode.upsert_contact(conn, name="John Smith", email="john@example.com",
+                               company="Acme Corp", context_notes="likes hiking")
+        db_mode.upsert_contact(conn, name="Alice Jones", email="johnson@acme.com",
+                               company="Globex", context_notes="john is a colleague")
+        db_mode.upsert_contact(conn, name="Bob Wilson", email="bob@test.com",
+                               company="Test Co", context_notes="no match here")
+
+        results = db_mode.search_contacts(conn, "john", limit=10)
+        assert len(results) >= 2, f"Expected >= 2 results, got {len(results)}"
+
+        # First result should have highest relevance (name match)
+        assert results[0]['_relevance'] >= results[1]['_relevance'], \
+            f"Relevance not descending: {results[0]['_relevance']} < {results[1]['_relevance']}"
+        # John Smith (name match) should rank above johnson@acme.com (email/notes match)
+        assert results[0]['name'] == "John Smith", \
+            f"Expected John Smith first, got {results[0]['name']}"
+    finally:
+        conn.close()
+
+
+def test_search_emails_subject_ranks_higher(db_mode):
+    """P5-01: Email yang cocok di subject harus ranking lebih tinggi dari
+    yang cocok hanya di body."""
+    conn = db_mode.get_connection()
+    try:
+        db_mode.insert_email(
+            conn, message_id="msg-1", thread_id="t1",
+            sender="a@test.com", recipient="b@test.com",
+            subject="Project Alpha kickoff", body="Just a regular message",
+            snippet="", received_at="2024-01-01T00:00:00", labels="[]")
+        db_mode.insert_email(
+            conn, message_id="msg-2", thread_id="t2",
+            sender="c@test.com", recipient="d@test.com",
+            subject="Weekly report", body="Discussing Project Alpha details",
+            snippet="", received_at="2024-01-02T00:00:00", labels="[]")
+
+        results = db_mode.search_emails(conn, "Alpha", limit=10)
+        assert len(results) == 2
+        # Subject match (msg-1) should rank higher than body match (msg-2)
+        assert results[0]['message_id'] == "msg-1", \
+            f"Expected msg-1 first (subject match), got {results[0]['message_id']}"
+        assert results[0]['_relevance'] > results[1]['_relevance']
+    finally:
+        conn.close()
+
+
+def test_get_upcoming_events_filters_by_query(db_mode):
+    """P5-02: get_upcoming_events dengan query harus filter by title/description."""
+    conn = db_mode.get_connection()
+    try:
+        db_mode.upsert_calendar_event(
+            conn, event_id="evt-1", title="Team Meeting",
+            description="Weekly sync with the team",
+            start_time="2026-12-01T10:00:00", end_time="2026-12-01T11:00:00")
+        db_mode.upsert_calendar_event(
+            conn, event_id="evt-2", title="Lunch",
+            description="Project Alpha discussion",
+            start_time="2026-12-02T12:00:00", end_time="2026-12-02T13:00:00")
+        db_mode.upsert_calendar_event(
+            conn, event_id="evt-3", title="Gym",
+            description="Workout",
+            start_time="2026-12-03T07:00:00", end_time="2026-12-03T08:00:00")
+
+        # Without query → all upcoming events
+        all_events = db_mode.get_upcoming_events(conn, limit=10)
+        assert len(all_events) == 3
+
+        # With query → only matching events
+        alpha_events = db_mode.get_upcoming_events(conn, limit=10, query="Alpha")
+        assert len(alpha_events) == 1
+        assert alpha_events[0]['event_id'] == "evt-2"
+
+        # With query → title match ranks higher than description match
+        team_events = db_mode.get_upcoming_events(conn, limit=10, query="Team")
+        assert len(team_events) == 1
+        assert team_events[0]['event_id'] == "evt-1"
+    finally:
+        conn.close()
 

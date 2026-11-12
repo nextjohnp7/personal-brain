@@ -138,74 +138,123 @@ def _conn():
 
 
 @mcp.tool()
-def brain_search(query: str, limit: int = 10, api_key: str = "") -> str:
+def brain_search(query: str, limit: int = 10, offset: int = 0, api_key: str = "") -> str:
     """Search the personal brain across contacts, emails, calendar, notes, knowledge, and semantic matches.
+
+    Results are ranked by relevance across all sources (title/name match
+    scores higher than body/content match).
 
     Args:
         query: Search keyword or phrase
-        limit: Maximum results per source (default: 10)
-        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer header)
+        limit: Maximum total results (default: 10)
+        offset: Results offset for pagination (default: 0)
+        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer ***
 
     Auth:
         Requires BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY_WRITE.
-        On HTTP, pass via Authorization: Bearer <key> or X-API-Key: <key> header.
+        On HTTP, pass via Authorization: Bearer *** or X-API-Key: *** header.
     """
     auth_error = _check_mcp_api_key(api_key, scope="read")
     if auth_error:
         return auth_error
     conn = _conn()
     try:
-        contacts = [dict(r) for r in search_contacts(conn, query, limit)]
-        emails = [dict(r) for r in search_emails(conn, query, limit)]
-        events = [dict(r) for r in get_upcoming_events(conn, limit)]
-        notes = [dict(r) for r in search_notes(conn, query, limit)]
-        knowledge = [dict(r) for r in search_knowledge(conn, query, limit)]
-        semantic = semantic_search(conn, query, limit)
+        contacts = search_contacts(conn, query, limit=limit * 2, offset=0)
+        emails = search_emails(conn, query, limit=limit * 2, offset=0)
+        events = get_upcoming_events(conn, limit=limit * 2, offset=0, query=query)
+        notes = search_notes(conn, query, limit=limit * 2, offset=0)
+        knowledge = search_knowledge(conn, query, limit=limit * 2, offset=0)
+        semantic = semantic_search(conn, query, limit=limit * 2)
         graph = query_knowledge_graph(conn, query, limit)
 
+        # Build a unified, relevance-ranked result list across all sources.
+        ranked = []
+        for c in contacts:
+            ranked.append({
+                'source': 'contact',
+                'relevance': c.get('_relevance', 0.0),
+                'title': c.get('name', '(no name)'),
+                'subtitle': c.get('email', 'no email'),
+                'detail': f"Company: {c.get('company', '-')} | Role: {c.get('role', '-')}",
+            })
+        for e in emails:
+            ranked.append({
+                'source': 'email',
+                'relevance': e.get('_relevance', 0.0),
+                'title': e.get('subject', '(no subject)'),
+                'subtitle': f"{e.get('sender', '')} → {e.get('recipient', '')}",
+                'detail': e.get('received_at', ''),
+            })
+        for ev in events:
+            ranked.append({
+                'source': 'calendar',
+                'relevance': ev.get('_relevance', 0.0),
+                'title': ev.get('title', '(no title)'),
+                'subtitle': ev.get('start_time', ''),
+                'detail': ev.get('location', ''),
+            })
+        for n in notes:
+            ranked.append({
+                'source': 'note',
+                'relevance': n.get('_relevance', 0.0),
+                'title': n.get('title', '(no title)'),
+                'subtitle': n.get('filename', ''),
+                'detail': (n.get('content', '') or '')[:120],
+            })
+        for k in knowledge:
+            ranked.append({
+                'source': 'knowledge',
+                'relevance': k.get('_relevance', 0.0),
+                'title': k.get('title', '(no title)'),
+                'subtitle': k.get('entry_type', ''),
+                'detail': (k.get('content', '') or '')[:120],
+            })
+        for s in semantic:
+            ranked.append({
+                'source': 'semantic',
+                'relevance': s.get('similarity', 0.0),
+                'title': f"[{s.get('source_type', '')}] semantic match",
+                'subtitle': s.get('source_id', ''),
+                'detail': (s.get('content_chunk', '') or '')[:150],
+            })
+
+        # Sort by relevance descending, then apply offset + limit
+        ranked.sort(key=lambda x: x['relevance'], reverse=True)
+        paginated = ranked[offset:offset + limit]
+
         lines = [f"# Brain Search Results for: {query}\n"]
+        lines.append(f"_Total matches: {len(ranked)} | Showing {offset + 1}-{min(offset + limit, len(ranked))}_\n")
 
-        if contacts:
-            lines.append("## Contacts")
-            for c in contacts:
-                lines.append(f"- {c['name']} ({c.get('email', 'no email')})")
-                if c.get('company'):
-                    lines.append(f"  Company: {c['company']}")
-                if c.get('role'):
-                    lines.append(f"  Role: {c['role']}")
-
-        if emails:
-            lines.append("\n## Emails")
-            for e in emails[:5]:
-                lines.append(f"- {e.get('sender', '')} → {e.get('subject', '(no subject)')}")
-
-        if events:
-            lines.append("\n## Calendar Events")
-            for ev in events[:5]:
-                lines.append(f"- {ev.get('title', '(no title)')} — {ev.get('start_time', '')}")
-
-        if notes:
-            lines.append("\n## Notes")
-            for n in notes[:5]:
-                lines.append(f"- {n.get('title', '(no title)')}")
-
-        if knowledge:
-            lines.append("\n## Knowledge")
-            for k in knowledge[:5]:
-                lines.append(f"- [{k.get('entry_type', '')}] {k.get('title', '')}")
-
-        if semantic:
-            lines.append("\n## Semantic Matches (by meaning)")
-            for s in semantic[:5]:
-                lines.append(f"- [{s['source_type']}] {s['content_chunk'][:150]} (relevance: {s['similarity']})")
-
-        if graph["relations"]:
-            lines.append("\n## Knowledge Graph Relations")
-            for r in graph["relations"][:5]:
-                lines.append(f"- {r['source_name']} →{r['relation_type']}→ {r['target_name']}")
-
-        if not any([contacts, emails, events, notes, knowledge, semantic, graph["relations"]]):
+        if not paginated:
             lines.append("_No results found._")
+            return "\n".join(lines)
+
+        # Group by source for readable output
+        by_source = {}
+        for item in paginated:
+            by_source.setdefault(item['source'], []).append(item)
+
+        source_labels = {
+            'contact': 'Contacts',
+            'email': 'Emails',
+            'calendar': 'Calendar Events',
+            'note': 'Notes',
+            'knowledge': 'Knowledge Entries',
+            'semantic': 'Semantic Matches',
+        }
+        for src in ('contact', 'email', 'calendar', 'note', 'knowledge', 'semantic'):
+            items = by_source.get(src, [])
+            if not items:
+                continue
+            lines.append(f"## {source_labels[src]}")
+            for item in items:
+                lines.append(
+                    f"- {item['title']} (relevance: {item['relevance']:.2f})"
+                )
+                if item['subtitle']:
+                    lines.append(f"  {item['subtitle']}")
+                if item['detail']:
+                    lines.append(f"  {item['detail']}")
 
         return "\n".join(lines)
     finally:
