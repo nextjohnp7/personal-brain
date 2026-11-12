@@ -96,6 +96,14 @@ csrf = CSRFProtect(app)
 limiter = Limiter(key_func=get_remote_address, app=app,
                   default_limits=[], storage_uri="memory://")
 
+# Security headers (fail-closed: every response gets protective headers)
+@app.after_request
+def _set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
 def _is_safe_url(target):
     if not target:
         return False

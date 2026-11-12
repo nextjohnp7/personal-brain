@@ -35,3 +35,13 @@ def test_login_rate_limited(dashboard, monkeypatch):
     codes = [c.post("/login", data={"username": "x", "password": "y"}).status_code
              for _ in range(7)]
     assert 429 in codes
+
+
+def test_security_headers_present(dashboard):
+    """Every response must carry protective security headers (F-06)."""
+    c = dashboard.app.test_client()
+    resp = c.get("/login")
+    assert resp.status_code == 200
+    assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+    assert resp.headers.get("X-Frame-Options") == "DENY"
+    assert resp.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
