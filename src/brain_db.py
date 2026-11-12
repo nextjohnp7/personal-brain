@@ -19,6 +19,23 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 DB_PATH = PROJECT_ROOT / "brain.db"
 ENCRYPTED_PATH = PROJECT_ROOT / "brain.db.enc"
 
+# Allowlist of characters permitted in table names (defense-in-depth for
+# f-string SQL). Only [a-zA-Z_][a-zA-Z0-9_]* is accepted — no SQL keywords,
+# no quotes, no semicolons, no comments.
+_TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_table_name(table: str) -> str:
+    """Validate a table name against a safe allowlist.
+
+    Returns the table name if valid, raises ValueError otherwise.
+    Defense-in-depth: f-string table names should never come from user input,
+    but this guards against future accidental misuse.
+    """
+    if not isinstance(table, str) or not _TABLE_NAME_RE.match(table):
+        raise ValueError(f"Invalid table name: {table!r}")
+    return table
+
 
 def _get_key_hex():
     """Reuse BRAIN_DB_KEY (Fernet key = base64 of 32 bytes) as SQLCipher raw key.
@@ -828,6 +845,7 @@ def export_brain_json(conn):
     data = {}
 
     def fetch_all(table, order_by=None):
+        table = _validate_table_name(table)
         q = f"SELECT * FROM {table}"
         if order_by:
             q += f" ORDER BY {order_by}"
@@ -1680,6 +1698,7 @@ def get_accessible_items(conn, user_id, item_type, limit=1000):
     table = table_map.get(item_type)
     if not table:
         return []
+    table = _validate_table_name(table)
 
     # Owned items
     cur.execute(f"""
@@ -1730,6 +1749,7 @@ def check_item_access(conn, user_id, item_type, item_id, required_level='read'):
     table = table_map.get(item_type)
     if not table:
         return None
+    table = _validate_table_name(table)
 
     cur = conn.cursor()
     cur.execute(f"SELECT owner_user_id FROM {table} WHERE id = ?", (item_id,))
@@ -2315,7 +2335,7 @@ def get_db_stats(conn):
                   "knowledge_entries", "entities", "entity_relations",
                   "conversations", "embeddings", "users"):
         try:
-            cur.execute(f"SELECT count(*) FROM {table}")
+            cur.execute(f"SELECT count(*) FROM {_validate_table_name(table)}")
             stats[table] = cur.fetchone()[0]
         except Exception:
             stats[table] = 0
