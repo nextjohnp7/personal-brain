@@ -11,7 +11,7 @@ import pytest
 @pytest.fixture()
 def dashboard(monkeypatch, tmp_path):
     """Isolated app: empty temp DB, auth off (repo default)."""
-    monkeypatch.delenv("BRAIN_DB_KEY", raising=False)  # plain SQLite mode
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")  # test key, encrypted mode
 
     import brain_db
     monkeypatch.setattr(brain_db, "DB_PATH", tmp_path / "brain_test.db")

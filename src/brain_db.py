@@ -21,10 +21,17 @@ ENCRYPTED_PATH = PROJECT_ROOT / "brain.db.enc"
 
 
 def _get_key_hex():
-    """Reuse BRAIN_DB_KEY (Fernet key = base64 of 32 bytes) as SQLCipher raw key."""
+    """Reuse BRAIN_DB_KEY (Fernet key = base64 of 32 bytes) as SQLCipher raw key.
+
+    Fail-closed: raises ValueError if BRAIN_DB_KEY is not set or empty.
+    No plaintext fallback — the database is always encrypted at rest.
+    """
     key_b64 = os.environ.get("BRAIN_DB_KEY")
     if not key_b64:
-        return None
+        raise ValueError(
+            "BRAIN_DB_KEY environment variable is required. "
+            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
     raw = base64.urlsafe_b64decode(key_b64)
     if len(raw) != 32:
         raise ValueError("BRAIN_DB_KEY must be base64 of 32 bytes (Fernet key).")
@@ -34,15 +41,15 @@ def _get_key_hex():
 def get_connection():
     """Open a connection to the SQLite database. Create tables if they do not exist.
 
-    If BRAIN_DB_KEY is set, the database is encrypted at rest using SQLCipher
-    (AES-256 per-page encryption). No temp plaintext file is ever written.
+    The database is ALWAYS encrypted at rest using SQLCipher
+    (AES-256 per-page encryption). BRAIN_DB_KEY must be set; no plaintext
+    fallback is permitted. No temp plaintext file is ever written.
     """
     key_hex = _get_key_hex()
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
 
-    if key_hex:
-        conn.execute(f'PRAGMA key = "x\'{key_hex}\'"')  # hex only, no injection risk
+    conn.execute(f'PRAGMA key = "x\'{key_hex}\'\"')  # hex only, no injection risk
 
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")   # wait for locks instead of erroring

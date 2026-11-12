@@ -9,16 +9,13 @@ from cryptography.fernet import Fernet
 def db_mode(request, monkeypatch, tmp_path):
     if request.param == "encrypted":
         monkeypatch.setenv("BRAIN_DB_KEY", Fernet.generate_key().decode())
-    else:
-        monkeypatch.delenv("BRAIN_DB_KEY", raising=False)
+    monkeypatch.setenv("BRAIN_DB_KEY", Fernet.generate_key().decode())
     import brain_db
     monkeypatch.setattr(brain_db, "DB_PATH", tmp_path / "brain_test.db")
     monkeypatch.setattr(brain_db, "ENCRYPTED_PATH", tmp_path / "brain_test.db.enc")
     return brain_db
 
-
 def test_two_connections_do_not_lose_writes(db_mode):
-    """Simulates dashboard + sync daemon writing concurrently."""
     brain_db = db_mode
     c1 = brain_db.get_connection()   # e.g. dashboard
     c2 = brain_db.get_connection()   # e.g. sync daemon

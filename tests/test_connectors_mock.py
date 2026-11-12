@@ -242,7 +242,7 @@ def test_gmail_sync_pagination(db_mode, monkeypatch):
     fake_build._gmail_410 = False
 
     monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
-    monkeypatch.setenv("BRAIN_DB_KEY", "")
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")  # test key, encrypted mode
 
     conn = db_mode.get_connection()
     try:
@@ -265,7 +265,7 @@ def test_gmail_sync_date_query(db_mode, monkeypatch):
     fake_build._gmail_410 = False
 
     monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
-    monkeypatch.setenv("BRAIN_DB_KEY", "")
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")  # test key, encrypted mode
 
     conn = db_mode.get_connection()
     try:
@@ -291,7 +291,7 @@ def test_calendar_sync_410_recovery(db_mode, monkeypatch):
     fake_build._calendar_410 = True
 
     monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
-    monkeypatch.setenv("BRAIN_DB_KEY", "")
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")  # test key, encrypted mode
 
     conn = db_mode.get_connection()
     try:
@@ -329,7 +329,7 @@ def test_calendar_sync_pagination(db_mode, monkeypatch):
     fake_build._calendar_410 = False
 
     monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
-    monkeypatch.setenv("BRAIN_DB_KEY", "")
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")  # test key, encrypted mode
 
     conn = db_mode.get_connection()
     try:
