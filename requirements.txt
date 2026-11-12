@@ -1,11 +1,5 @@
-flask>=3.0
-cryptography>=42.0
-sqlcipher3-binary>=0.2.0
-requests>=2.31
-google-api-python-client>=2.100
-google-auth>=2.23
-google-auth-oauthlib>=1.1
-google-auth-httplib2>=0.2
-flask-wtf>=1.2
-flask-limiter>=3.5
-mcp>=1.0,<2
+# See pyproject.toml for the real dependency list
+# For development: pip install -e '.[dev]'
+# For embeddings:  pip install -e '.[embeddings]'
+-e .
+

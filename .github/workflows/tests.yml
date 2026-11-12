@@ -4,12 +4,21 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -r requirements-dev.txt
+      - run: pip install -e '.[dev]'
       - run: python -m pytest tests/ -v
+      - name: Lint with ruff
+        run: python -m ruff check . || true
+      - name: Type check with mypy
+        run: python -m mypy src/brain_db.py brain_web_dashboard.py brain_mcp_server.py manage_brain.py brain_sync_daemon.py brain_voice.py || true
+      - name: Coverage report
+        run: |
+          python -m coverage run -m pytest tests/
+          python -m coverage report --fail-under=80 || true

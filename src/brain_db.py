@@ -10,7 +10,12 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-import sqlcipher3 as sqlite3
+try:
+    import sqlcipher3 as sqlite3
+    _SQLCIPHER = True
+except ImportError:
+    import sqlite3
+    _SQLCIPHER = False
 from brain_embeddings import embed_text, cosine_similarity as _cosine_similarity
 
 # Database location at project root
@@ -37,6 +42,13 @@ def get_connection():
     (AES-256 per-page encryption). No temp plaintext file is ever written.
     """
     key_hex = _get_key_hex()
+    if key_hex and not _SQLCIPHER:
+        raise RuntimeError(
+            "BRAIN_DB_KEY is set but sqlcipher3 is not installed. "
+            "Install sqlcipher3-binary (Linux x86_64 only), build sqlcipher3 "
+            "from source against libsqlcipher, or run without BRAIN_DB_KEY "
+            "(unencrypted) on an encrypted disk."
+        )
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
 
