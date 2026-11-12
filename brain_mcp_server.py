@@ -13,6 +13,8 @@ import os
 import subprocess
 import argparse
 import logging
+import hmac
+import contextvars
 from pathlib import Path
 
 logging.basicConfig(
@@ -30,6 +32,9 @@ try:
 except ImportError:
     logger.error("MCP package not installed. Run: pip install mcp")
     sys.exit(1)
+
+from starlette.middleware.base import BaseHTTPMiddleware
+import uvicorn
 
 from brain_db import (
     get_connection,
@@ -50,12 +55,67 @@ mcp = FastMCP("Personal Brain")
 
 # MCP API key protection
 BRAIN_MCP_API_KEY = os.environ.get("BRAIN_MCP_API_KEY", "")
+BRAIN_MCP_API_KEY_READ = os.environ.get("BRAIN_MCP_API_KEY_READ", "")
+BRAIN_MCP_API_KEY_WRITE = os.environ.get("BRAIN_MCP_API_KEY_WRITE", "")
+
+# Resolve effective keys: WRITE implies READ; legacy BRAIN_MCP_API_KEY = both
+EFFECTIVE_READ_KEY = BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY or ""
+EFFECTIVE_WRITE_KEY = BRAIN_MCP_API_KEY_WRITE or BRAIN_MCP_API_KEY or ""
+
+# Context var to carry API key from HTTP header into tool functions
+_mcp_api_key_ctx = contextvars.ContextVar("mcp_api_key", default="")
 
 
-def _check_mcp_api_key(api_key: str) -> str | None:
-    """Returns error message if API key invalid, None if valid (or auth disabled)."""
-    if BRAIN_MCP_API_KEY and api_key != BRAIN_MCP_API_KEY:
-        return "Invalid or missing MCP API key. Set BRAIN_MCP_API_KEY environment variable."
+class MCPAuthMiddleware(BaseHTTPMiddleware):
+    """Extract API key from Authorization: Bearer or X-API-Key header."""
+
+    async def dispatch(self, request, call_next):
+        auth_header = request.headers.get("authorization", "")
+        x_api_key = request.headers.get("x-api-key", "")
+        key = ""
+        if auth_header.startswith("Bearer "):
+            key = auth_header[len("Bearer "):]
+        elif x_api_key:
+            key = x_api_key
+        _mcp_api_key_ctx.set(key)
+        try:
+            return await call_next(request)
+        finally:
+            _mcp_api_key_ctx.set("")
+
+
+def _get_effective_key(api_key_param: str) -> str:
+    """Return API key from parameter (stdio) or header context (HTTP)."""
+    if api_key_param:
+        return api_key_param
+    return _mcp_api_key_ctx.get()
+
+
+def _check_mcp_api_key(api_key: str, scope: str = "read") -> str | None:
+    """Returns error message if API key invalid, None if valid (or auth disabled).
+
+    Args:
+        api_key: API key from parameter or header context
+        scope: "read" for read-only tools, "write" for read-write tools
+    """
+    effective_key = _get_effective_key(api_key)
+    if not effective_key:
+        # Auth not configured — allow all
+        return None
+
+    read_key = EFFECTIVE_READ_KEY
+    write_key = EFFECTIVE_WRITE_KEY
+
+    if scope == "write":
+        # Write key grants both read and write
+        if not write_key or not hmac.compare_digest(effective_key, write_key):
+            return "Invalid or missing MCP API key (write scope required). Set BRAIN_MCP_API_KEY_WRITE."
+    else:
+        # Read scope: accept read key or write key
+        read_ok = read_key and hmac.compare_digest(effective_key, read_key)
+        write_ok = write_key and hmac.compare_digest(effective_key, write_key)
+        if not read_ok and not write_ok:
+            return "Invalid or missing MCP API key (read scope required). Set BRAIN_MCP_API_KEY_READ."
     return None
 
 
@@ -70,9 +130,13 @@ def brain_search(query: str, limit: int = 10, api_key: str = "") -> str:
     Args:
         query: Search keyword or phrase
         limit: Maximum results per source (default: 10)
-        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
+        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer header)
+
+    Auth:
+        Requires BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY_WRITE.
+        On HTTP, pass via Authorization: Bearer <key> or X-API-Key: <key> header.
     """
-    auth_error = _check_mcp_api_key(api_key)
+    auth_error = _check_mcp_api_key(api_key, scope="read")
     if auth_error:
         return auth_error
     conn = _conn()
@@ -140,9 +204,12 @@ def brain_contact_context(name: str, api_key: str = "") -> str:
 
     Args:
         name: Contact name to look up
-        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
+        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer header)
+
+    Auth:
+        Requires BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY_WRITE.
     """
-    auth_error = _check_mcp_api_key(api_key)
+    auth_error = _check_mcp_api_key(api_key, scope="read")
     if auth_error:
         return auth_error
     conn = _conn()
@@ -199,9 +266,12 @@ def brain_add_contact(name: str, email: str = "", phone: str = "", company: str 
         company: Company name (optional)
         role: Job role (optional)
         notes: Free-form notes (optional)
-        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
+        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer header)
+
+    Auth:
+        Requires BRAIN_MCP_API_KEY_WRITE (grants both read and write).
     """
-    auth_error = _check_mcp_api_key(api_key)
+    auth_error = _check_mcp_api_key(api_key, scope="write")
     if auth_error:
         return auth_error
     conn = _conn()
@@ -231,9 +301,12 @@ def brain_add_relation(source_name: str, target_name: str, relation_type: str, s
         relation_type: Type of relation (e.g., 'works_at', 'knows', 'met_with')
         source: Source of the relation (default: manual)
         confidence: Confidence score 0.0-1.0 (default: 1.0)
-        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
+        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer header)
+
+    Auth:
+        Requires BRAIN_MCP_API_KEY_WRITE (grants both read and write).
     """
-    auth_error = _check_mcp_api_key(api_key)
+    auth_error = _check_mcp_api_key(api_key, scope="write")
     if auth_error:
         return auth_error
     conn = _conn()
@@ -260,9 +333,12 @@ def brain_semantic_search(query: str, limit: int = 10, api_key: str = "") -> str
     Args:
         query: Search phrase
         limit: Maximum results (default: 10)
-        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
+        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer header)
+
+    Auth:
+        Requires BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY_WRITE.
     """
-    auth_error = _check_mcp_api_key(api_key)
+    auth_error = _check_mcp_api_key(api_key, scope="read")
     if auth_error:
         return auth_error
     conn = _conn()
@@ -286,9 +362,12 @@ def brain_knowledge_graph(name: str, limit: int = 10, api_key: str = "") -> str:
     Args:
         name: Entity name to query
         limit: Maximum relations (default: 10)
-        api_key: MCP API key (required if BRAIN_MCP_API_KEY is set)
+        api_key: MCP API key (stdio only; for HTTP, use Authorization: Bearer header)
+
+    Auth:
+        Requires BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY_WRITE.
     """
-    auth_error = _check_mcp_api_key(api_key)
+    auth_error = _check_mcp_api_key(api_key, scope="read")
     if auth_error:
         return auth_error
     conn = _conn()
@@ -379,15 +458,21 @@ def main():
         args.http = True  # tailscale implies HTTP
 
     if args.http:
-        if not BRAIN_MCP_API_KEY:
+        if not EFFECTIVE_READ_KEY and not EFFECTIVE_WRITE_KEY:
             logger.error(
-                "BRAIN_MCP_API_KEY not set — refusing to start MCP HTTP server without auth. "
-                "Set BRAIN_MCP_API_KEY environment variable or use --stdio for local access."
+                "BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY_WRITE not set — "
+                "refusing to start MCP HTTP server without auth. "
+                "Set BRAIN_MCP_API_KEY_READ (or BRAIN_MCP_API_KEY_WRITE) environment "
+                "variable or use --stdio for local access."
             )
             sys.exit(1)
+        # Get ASGI app and wrap with auth middleware (header-based API key)
+        starlette_app = mcp.streamable_http_app()
+        app = MCPAuthMiddleware(starlette_app)
         logger.info(f"Starting Brain MCP Server on HTTP {host}:{args.port}")
         logger.info(f"Tailscale clients can connect at: {host}:{args.port}")
-        mcp.run(transport="http", host=host, port=args.port)
+        logger.info("Auth: pass Authorization: Bearer <key> or X-API-Key: <key> header")
+        uvicorn.run(app, host=host, port=args.port, log_level="info")
     else:
         # Default to stdio for local agent integration
         logger.info("Starting Brain MCP Server on stdio")
