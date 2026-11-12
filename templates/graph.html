@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}Knowledge Graph - Personal Brain{% endblock %}
+
+{% block content %}
+<div class="search-box">
+    <form method="get" action="{{ url_for('graph') }}">
+        <input type="text" name="q" value="{{ query or '' }}" placeholder="Search knowledge graph...">
+    </form>
+</div>
+{% if graph.entities %}
+<h3>Entities ({{ graph.entities|length }})</h3>
+<table>
+    <thead><tr><th>Name</th><th>Type</th><th>Source</th></tr></thead>
+    <tbody>
+    {% for e in graph.entities %}
+    <tr>
+        <td><strong>{{ e.name }}</strong></td>
+        <td><span class="badge badge-{{ e.entity_type }}">{{ e.entity_type }}</span></td>
+        <td>{{ e.source }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% if graph.relations %}
+<h3>Relations ({{ graph.relations|length }})</h3>
+<table>
+    <thead><tr><th>Source</th><th>Relation</th><th>Target</th><th>Confidence</th></tr></thead>
+    <tbody>
+    {% for r in graph.relations %}
+    <tr>
+        <td><strong>{{ r.source_name }}</strong></td>
+        <td>{{ r.relation_type }}</td>
+        <td><strong>{{ r.target_name }}</strong></td>
+        <td>{{ "%.2f"|format(r.confidence) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% if not graph.entities and not graph.relations %}
+<div class="empty">No knowledge graph data found.</div>
+{% endif %}
+{% endblock %}

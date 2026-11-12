@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Import - Personal Brain{% endblock %}
+
+{% block content %}
+<h2>Import Brain Data</h2>
+<p>Upload a JSON file exported from another brain instance.</p>
+<form method="POST" enctype="multipart/form-data">
+    <div class="form-group">
+        <label>JSON File</label>
+        <input type="file" name="file" accept=".json" required>
+    </div>
+    <button type="submit" class="btn">Import</button>
+</form>
+{% endblock %}

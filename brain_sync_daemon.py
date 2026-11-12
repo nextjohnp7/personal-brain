@@ -17,6 +17,7 @@ import time
 import json
 import argparse
 import logging
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -173,7 +174,7 @@ def sync_gmail_once(conn, creds, state):
     """Sync new emails from Gmail since last sync.
 
     Uses Gmail API 'after:' query to only fetch messages newer than
-    the last successful sync.
+    the last successful sync. Handles pagination via nextPageToken.
     """
     from googleapiclient.discovery import build
 
@@ -192,71 +193,84 @@ def sync_gmail_once(conn, creds, state):
         query = ""
 
     stats = {"emails": 0, "contacts": 0, "new_messages": 0}
-    newest_date = None
+    newest_dt = None  # track newest as datetime object
 
     try:
-        result = service.users().messages().list(
-            userId="me", maxResults=100, q=query
-        ).execute()
-        messages = result.get("messages", [])
+        page_token = None
+        while True:
+            result = service.users().messages().list(
+                userId="me", maxResults=100, q=query, pageToken=page_token
+            ).execute()
+            messages = result.get("messages", [])
 
-        if not messages:
-            logger.info("Gmail: no new messages")
-            return state, stats
+            if not messages:
+                break
 
-        for msg in messages:
-            try:
-                msg_data = service.users().messages().get(
-                    userId="me", id=msg["id"], format="metadata"
-                ).execute()
+            for msg in messages:
+                try:
+                    msg_data = service.users().messages().get(
+                        userId="me", id=msg["id"], format="metadata"
+                    ).execute()
 
-                headers = {
-                    h["name"]: h["value"]
-                    for h in msg_data["payload"].get("headers", [])
-                }
-                message_id = msg_data.get("id", "")
-                thread_id = msg_data.get("threadId", "")
-                sender = headers.get("From", "")
-                recipient = headers.get("To", "")
-                subject = headers.get("Subject", "")
-                snippet = msg_data.get("snippet", "")
-                received_at = headers.get("Date", "")
+                    headers = {
+                        h["name"]: h["value"]
+                        for h in msg_data["payload"].get("headers", [])
+                    }
+                    message_id = msg_data.get("id", "")
+                    thread_id = msg_data.get("threadId", "")
+                    sender = headers.get("From", "")
+                    recipient = headers.get("To", "")
+                    subject = headers.get("Subject", "")
+                    snippet = msg_data.get("snippet", "")
+                    received_at = headers.get("Date", "")
 
-                # Track newest received_at for state update
-                if received_at:
-                    if newest_date is None or received_at > newest_date:
-                        newest_date = received_at
+                    # Track newest received_at using parsed datetime
+                    if received_at:
+                        try:
+                            msg_dt = parsedate_to_datetime(received_at)
+                            if newest_dt is None or msg_dt > newest_dt:
+                                newest_dt = msg_dt
+                        except Exception:
+                            pass
 
-                # Extract email from sender
-                sender_email = _extract_email(sender)
-                sender_name = _extract_name(sender)
+                    # Extract email from sender
+                    sender_email = _extract_email(sender)
+                    sender_name = _extract_name(sender)
 
-                # Insert or update contact
-                contact_id = None
-                if sender_email:
-                    contact_id = upsert_contact(
-                        conn, name=sender_name or sender_email,
-                        email=sender_email, source="gmail"
+                    # Insert or update contact
+                    contact_id = None
+                    if sender_email:
+                        contact_id = upsert_contact(
+                            conn, name=sender_name or sender_email,
+                            email=sender_email, source="gmail"
+                        )
+                        update_contact_interaction(conn, contact_id)
+                        stats["contacts"] += 1
+
+                    # Insert email (INSERT OR IGNORE handles duplicates)
+                    insert_email(
+                        conn, message_id=message_id, thread_id=thread_id,
+                        sender=sender, recipient=recipient, subject=subject,
+                        body=snippet, snippet=snippet,
+                        received_at=received_at,
+                        labels=msg_data.get("labelIds", []), contact_id=contact_id
                     )
-                    update_contact_interaction(conn, contact_id)
-                    stats["contacts"] += 1
+                    stats["emails"] += 1
+                    stats["new_messages"] += 1
 
-                # Insert email (INSERT OR IGNORE handles duplicates)
-                insert_email(
-                    conn, message_id=message_id, thread_id=thread_id,
-                    sender=sender, recipient=recipient, subject=subject,
-                    body=snippet, snippet=snippet, received_at=received_at,
-                    labels=msg_data.get("labelIds", []), contact_id=contact_id
-                )
-                stats["emails"] += 1
-                stats["new_messages"] += 1
+                except Exception as e:
+                    logger.error(
+                        f"Failed to process Gmail message {msg.get('id')}: {e}"
+                    )
 
-            except Exception as e:
-                logger.error(f"Failed to process Gmail message {msg.get('id')}: {e}")
+            # Pagination
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
 
-        # Update last sync timestamp
-        if newest_date:
-            state["gmail_last_sync"] = newest_date
+        # Update last sync timestamp (store in ISO format)
+        if newest_dt:
+            state["gmail_last_sync"] = newest_dt.isoformat()
         else:
             state["gmail_last_sync"] = datetime.now(timezone.utc).isoformat()
 
@@ -277,95 +291,115 @@ def sync_gmail_once(conn, creds, state):
 # =====================================================================
 
 def sync_calendar_once(conn, creds, state):
-    """Sync new calendar events from Google Calendar since last sync."""
+    """Sync calendar events from Google Calendar.
+
+    Uses Calendar API syncToken for incremental sync (catches edits,
+    deletions, and new events regardless of start time). Falls back to
+    updatedMin on first run. Handles pagination via nextPageToken.
+    """
     from googleapiclient.discovery import build
 
     service = build("calendar", "v3", credentials=creds)
-    last_sync = state.get("calendar_last_sync")
-
-    # timeMin: only events after last sync
-    if last_sync:
-        time_min = last_sync
-    else:
-        # Default: sync events from last 30 days on first run
-        time_min = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    sync_token = state.get("calendar_sync_token")
 
     stats = {"events": 0, "contacts": 0, "new_events": 0}
-    newest_start = None
 
     try:
-        events_result = service.events().list(
-            calendarId="primary",
-            timeMin=time_min,
-            maxResults=250,
-            singleEvents=True,
-            orderBy="startTime",
-        ).execute()
-        events = events_result.get("items", [])
+        page_token = None
+        while True:
+            kwargs = {
+                "calendarId": "primary",
+                "maxResults": 250,
+                "singleEvents": True,
+                "orderBy": "startTime",
+                "pageToken": page_token,
+            }
+            if sync_token:
+                kwargs["syncToken"] = sync_token
+            else:
+                # First run: sync events updated in last 30 days
+                kwargs["updatedMin"] = (
+                    datetime.now(timezone.utc) - timedelta(days=30)
+                ).isoformat()
 
-        if not events:
-            logger.info("Calendar: no new events")
-            return state, stats
+            events_result = service.events().list(**kwargs).execute()
+            events = events_result.get("items", [])
 
-        for event in events:
-            try:
-                event_id = event.get("id", "")
-                title = event.get("summary", "(No Title)")
-                description = event.get("description", "")
-                start = event.get("start", {}).get(
-                    "dateTime", event.get("start", {}).get("date", "")
-                )
-                end = event.get("end", {}).get(
-                    "dateTime", event.get("end", {}).get("date", "")
-                )
-                location = event.get("location", "")
-                attendees = event.get("attendees", [])
-                attendee_emails = [
-                    a.get("email", "")
-                    for a in attendees
-                    if a.get("email")
-                ]
+            if not events:
+                break
 
-                # Track newest start time for state update
-                if start:
-                    if newest_start is None or start > newest_start:
-                        newest_start = start
+            for event in events:
+                try:
+                    # Handle deleted events (status == "cancelled")
+                    if event.get("status") == "cancelled":
+                        event_id = event.get("id", "")
+                        if event_id:
+                            cur = conn.cursor()
+                            cur.execute(
+                                "DELETE FROM calendar_events WHERE event_id = ?",
+                                (event_id,),
+                            )
+                            conn.commit()
+                        continue
 
-                # Link to contact (organizer or first attendee)
-                contact_id = None
-                organizer = event.get("organizer", {})
-                organizer_email = organizer.get("email", "")
-                organizer_name = organizer.get("displayName", "")
-
-                if organizer_email:
-                    contact_id = upsert_contact(
-                        conn, name=organizer_name or organizer_email,
-                        email=organizer_email, source="calendar"
+                    event_id = event.get("id", "")
+                    title = event.get("summary", "(No Title)")
+                    description = event.get("description", "")
+                    start = event.get("start", {}).get(
+                        "dateTime", event.get("start", {}).get("date", "")
                     )
-                    stats["contacts"] += 1
-                elif attendee_emails:
-                    contact_id = upsert_contact(
-                        conn, name=attendee_emails[0],
-                        email=attendee_emails[0], source="calendar"
+                    end = event.get("end", {}).get(
+                        "dateTime", event.get("end", {}).get("date", "")
+                    )
+                    location = event.get("location", "")
+                    attendees = event.get("attendees", [])
+                    attendee_emails = [
+                        a.get("email", "")
+                        for a in attendees
+                        if a.get("email")
+                    ]
+
+                    # Link to contact (organizer or first attendee)
+                    contact_id = None
+                    organizer = event.get("organizer", {})
+                    organizer_email = organizer.get("email", "")
+                    organizer_name = organizer.get("displayName", "")
+
+                    if organizer_email:
+                        contact_id = upsert_contact(
+                            conn, name=organizer_name or organizer_email,
+                            email=organizer_email, source="calendar"
+                        )
+                        stats["contacts"] += 1
+                    elif attendee_emails:
+                        contact_id = upsert_contact(
+                            conn, name=attendee_emails[0],
+                            email=attendee_emails[0], source="calendar"
+                        )
+
+                    upsert_calendar_event(
+                        conn, event_id=event_id, title=title,
+                        description=description, start_time=start, end_time=end,
+                        location=location, attendees=attendee_emails,
+                        contact_id=contact_id,
+                    )
+                    stats["events"] += 1
+                    stats["new_events"] += 1
+
+                except Exception as e:
+                    logger.error(
+                        f"Failed to process calendar event {event.get('id')}: {e}"
                     )
 
-                upsert_calendar_event(
-                    conn, event_id=event_id, title=title,
-                    description=description, start_time=start, end_time=end,
-                    location=location, attendees=attendee_emails,
-                    contact_id=contact_id,
-                )
-                stats["events"] += 1
-                stats["new_events"] += 1
+            # Pagination
+            page_token = events_result.get("nextPageToken")
+            if not page_token:
+                break
 
-            except Exception as e:
-                logger.error(
-                    f"Failed to process calendar event {event.get('id')}: {e}"
-                )
-
-        # Update last sync timestamp
-        if newest_start:
-            state["calendar_last_sync"] = newest_start
+        # Store syncToken for next incremental sync
+        next_sync_token = events_result.get("nextSyncToken")
+        if next_sync_token:
+            state["calendar_sync_token"] = next_sync_token
         else:
             state["calendar_last_sync"] = datetime.now(timezone.utc).isoformat()
 

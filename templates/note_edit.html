@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Note - Personal Brain{% endblock %}
+
+{% block content %}
+<h2>Edit Note: {{ note.title or '(no title)' }}</h2>
+<form method="POST">
+    <div class="form-group">
+        <label>Filename</label>
+        <input type="text" name="filename" value="{{ note.filename }}">
+    </div>
+    <div class="form-group">
+        <label>Title</label>
+        <input type="text" name="title" value="{{ note.title or '' }}">
+    </div>
+    <div class="form-group">
+        <label>Content</label>
+        <textarea name="content">{{ note.content or '' }}</textarea>
+    </div>
+    <div class="form-group">
+        <label>Summary</label>
+        <input type="text" name="summary" value="{{ note.summary or '' }}">
+    </div>
+    <div class="form-group">
+        <label>Tags (comma-separated)</label>
+        <input type="text" name="tags" value="{{ note.tags or '' }}">
+    </div>
+    <button type="submit" class="btn">Save Changes</button>
+</form>
+{% endblock %}

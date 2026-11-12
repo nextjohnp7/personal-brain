@@ -1,10 +1,10 @@
 """Brain Encryption - File-level encryption for brain.db using Fernet (symmetric).
 
 All data in brain.db is encrypted at rest. The encryption key is stored
-in the BRAIN_ENCRYPTION_KEY environment variable.
+in the BRAIN_DB_KEY environment variable.
 
 Setup:
-    export BRAIN_ENCRYPTION_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+    export BRAIN_DB_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 
 The encrypted database is stored as brain.db.enc. The plaintext brain.db
 is never written to disk.
@@ -27,23 +27,23 @@ PLAINTEXT_DB_PATH = PROJECT_ROOT / "brain.db"
 def get_encryption_key() -> bytes:
     """Get or generate the encryption key.
 
-    Reads BRAIN_ENCRYPTION_KEY from environment. If not set, generates
+    Reads BRAIN_DB_KEY from environment. If not set, generates
     a new key and prints it to stdout (user must save it).
     """
-    key_b64 = os.environ.get("BRAIN_ENCRYPTION_KEY", "")
+    key_b64 = os.environ.get("BRAIN_DB_KEY", "")
     if not key_b64:
         key = Fernet.generate_key()
         print("\n" + "=" * 60)
-        print("BRAIN_ENCRYPTION_KEY not set. Generated new key:")
+        print("BRAIN_DB_KEY not set. Generated new key:")
         print(key.decode())
-        print("Save this key to your .env file as BRAIN_ENCRYPTION_KEY")
+        print("Save this key to your .env file as BRAIN_DB_KEY")
         print("=" * 60 + "\n")
         return key
     try:
         return base64.urlsafe_b64decode(key_b64)
     except Exception:
         raise ValueError(
-            "BRAIN_ENCRYPTION_KEY is invalid. It must be a base64-encoded 32-byte key."
+            "BRAIN_DB_KEY is invalid. It must be a base64-encoded 32-byte key."
         )
 
 

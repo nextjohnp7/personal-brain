@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Search - Personal Brain{% endblock %}
+
+{% block content %}
+<div class="search-box">
+    <form method="get" action="{{ url_for('search') }}">
+        <input type="text" name="q" value="{{ query or '' }}" placeholder="Search brain...">
+    </form>
+</div>
+{% if query %}
+<h3>Results for: "{{ query }}"</h3>
+
+{% if results.contacts %}
+<h4>Contacts ({{ results.contacts|length }})</h4>
+<ul>
+{% for c in results.contacts %}
+<li><strong>{{ c.name }}</strong> - {{ c.email or 'no email' }} {% if c.company %}({{ c.company }}){% endif %}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if results.notes %}
+<h4>Notes ({{ results.notes|length }})</h4>
+<ul>
+{% for n in results.notes %}
+<li><strong>{{ n.title or n.filename }}</strong> - {{ (n.summary or '')[:100] }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if results.knowledge %}
+<h4>Knowledge ({{ results.knowledge|length }})</h4>
+<ul>
+{% for k in results.knowledge %}
+<li><strong>{{ k.title }}</strong> - {{ k.content[:100] }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if semantic %}
+<h4>Semantic Matches ({{ semantic|length }})</h4>
+<ul>
+{% for s in semantic %}
+<li>[{{ s.source_type }}] {{ s.content_chunk[:150] }} (relevance: {{ s.similarity }})</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if graph and graph.relations %}
+<h4>Knowledge Graph Relations</h4>
+<ul>
+{% for r in graph.relations %}
+<li>{{ r.source_name }} &rarr;{{ r.relation_type }}&rarr; {{ r.target_name }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if not results.contacts and not results.notes and not results.knowledge and not semantic and (not graph or not graph.relations) %}
+<div class="empty">No results found.</div>
+{% endif %}
+{% endif %}
+{% endblock %}

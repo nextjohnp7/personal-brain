@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Notes - Personal Brain{% endblock %}
+
+{% block content %}
+<div class="search-box">
+    <form method="get" action="{{ url_for('list_notes') }}">
+        <input type="text" name="q" value="{{ query or '' }}" placeholder="Search notes...">
+    </form>
+</div>
+<a href="{{ url_for('add_note') }}" class="btn">+ Add Note</a>
+{% if notes %}
+<table>
+    <thead><tr><th>Title</th><th>File</th><th>Summary</th><th>Tags</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for n in notes %}
+    <tr>
+        <td><strong>{{ n.title or '(no title)' }}</strong></td>
+        <td>{{ n.filename or '-' }}</td>
+        <td>{{ (n.summary or '')[:80] }}{% if n.summary and n.summary|length > 80 %}...{% endif %}</td>
+        <td>{{ n.tags or '-' }}</td>
+        <td>
+            <a href="{{ url_for('edit_note', note_id=n.id) }}" class="btn btn-sm">Edit</a>
+            <form method="POST" action="{{ url_for('delete_note', note_id=n.id) }}" style="display:inline" onsubmit="return confirm('Delete this note?')">
+                <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No notes found.</div>
+{% endif %}
+{% endblock %}

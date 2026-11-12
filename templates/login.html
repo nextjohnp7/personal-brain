@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}Login - Personal Brain{% endblock %}
+
+{% block content %}
+<h2>Login</h2>
+<form method="POST">
+    <div class="form-group">
+        <label>Username</label>
+        <input type="text" name="username" required>
+    </div>
+    <div class="form-group">
+        <label>Password</label>
+        <input type="password" name="password" required>
+    </div>
+    <button type="submit" class="btn">Login</button>
+</form>
+<p><small>Set BRAIN_DASHBOARD_USER and BRAIN_DASHBOARD_PASSWORD to enable login.</small></p>
+{% endblock %}

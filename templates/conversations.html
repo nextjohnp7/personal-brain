@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Conversations - Personal Brain{% endblock %}
+
+{% block content %}
+<h2>Conversation History</h2>
+{% if conversations %}
+<table>
+    <thead><tr><th>Time</th><th>User Message</th><th>Agent Response</th><th>Context Used</th></tr></thead>
+    <tbody>
+    {% for c in conversations %}
+    <tr>
+        <td>{{ c.created_at }}</td>
+        <td>{{ c.user_message[:100] }}{% if c.user_message|length > 100 %}...{% endif %}</td>
+        <td>{{ c.agent_response[:100] }}{% if c.agent_response|length > 100 %}...{% endif %}</td>
+        <td>{{ c.context_used or '[]' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No conversations yet.</div>
+{% endif %}
+{% endblock %}

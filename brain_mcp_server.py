@@ -379,6 +379,12 @@ def main():
         args.http = True  # tailscale implies HTTP
 
     if args.http:
+        if not BRAIN_MCP_API_KEY:
+            logger.error(
+                "BRAIN_MCP_API_KEY not set — refusing to start MCP HTTP server without auth. "
+                "Set BRAIN_MCP_API_KEY environment variable or use --stdio for local access."
+            )
+            sys.exit(1)
         logger.info(f"Starting Brain MCP Server on HTTP {host}:{args.port}")
         logger.info(f"Tailscale clients can connect at: {host}:{args.port}")
         mcp.run(transport="http", host=host, port=args.port)

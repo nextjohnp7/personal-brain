@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Personal Brain{% endblock %}
+
+{% block content %}
+<div class="stats">
+    <div class="stat-card"><h3>Contacts</h3><div class="value">{{ stats.contacts }}</div></div>
+    <div class="stat-card"><h3>Notes</h3><div class="value">{{ stats.notes }}</div></div>
+    <div class="stat-card"><h3>Knowledge Entries</h3><div class="value">{{ stats.knowledge }}</div></div>
+    <div class="stat-card"><h3>Graph Entities</h3><div class="value">{{ stats.entities }}</div></div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+    <div class="stat-card">
+        <h3 style="margin-top:0">Quick Actions</h3>
+        <a href="{{ url_for('add_contact') }}" class="btn">Add Contact</a><br>
+        <a href="{{ url_for('add_note') }}" class="btn" style="margin-top:0.5rem">Add Note</a><br>
+        <a href="{{ url_for('search') }}" class="btn" style="margin-top:0.5rem">Search Brain</a><br>
+        <a href="{{ url_for('graph') }}" class="btn" style="margin-top:0.5rem">View Knowledge Graph</a>
+    </div>
+    <div class="stat-card">
+        <h3 style="margin-top:0">About</h3>
+        <p style="font-size:0.9rem; color:#888">
+            Personal Brain is your local, searchable knowledge base.<br>
+            All data stored in SQLite on your computer.<br>
+            No server required.<br>
+            <small>API key for sharing: set BRAIN_API_KEY env var.</small>
+        </p>
+    </div>
+</div>
+{% endblock %}

@@ -16,6 +16,7 @@ import sys
 import os
 import json
 import argparse
+import hmac
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from flask import (
-    Flask, render_template_string, request, redirect,
+    Flask, render_template, request, redirect,
     url_for, jsonify, session, flash,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -59,8 +60,14 @@ from brain_db import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("brain-web-dashboard")
 
+import secrets
+
 app = Flask(__name__)
-app.secret_key = os.environ.get("BRAIN_DASHBOARD_SECRET", "dev-secret-change-me")
+_secret = os.environ.get("BRAIN_DASHBOARD_SECRET", "")
+if not _secret:
+    _secret = secrets.token_hex(32)
+    logger.warning("BRAIN_DASHBOARD_SECRET not set — using random generated key (sessions invalid on restart)")
+app.secret_key = _secret
 
 # Simple API key protection for sharing
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
@@ -96,7 +103,7 @@ def require_api_key(f):
     def decorated(*args, **kwargs):
         if BRAIN_API_KEY:
             provided = request.headers.get("X-API-Key", "") or request.args.get("api_key", "")
-            if not provided or provided != BRAIN_API_KEY:
+            if not provided or not hmac.compare_digest(provided, BRAIN_API_KEY):
                 return jsonify({"error": "Invalid or missing API key"}), 401
         return f(*args, **kwargs)
     return decorated
@@ -120,7 +127,7 @@ def login():
             next_url = request.args.get("next") or url_for("index")
             return redirect(next_url)
         flash("Invalid username or password", "error")
-    return render_template_string(LOGIN_HTML)
+    return render_template("login.html")
 
 
 @app.route("/logout")
@@ -151,7 +158,7 @@ def index():
             "knowledge": len(knowledge),
             "entities": len(entities),
         }
-        return render_template_string(DASHBOARD_HTML, stats=stats, page="dashboard")
+        return render_template("dashboard.html", stats=stats, page="dashboard")
     finally:
         conn.close()
 
@@ -165,7 +172,7 @@ def list_contacts():
     conn = get_conn()
     try:
         contacts = [dict(r) for r in search_contacts(conn, q, limit=100)]
-        return render_template_string(CONTACTS_HTML, contacts=contacts, query=q, page="contacts")
+        return render_template("contacts.html", contacts=contacts, query=q, page="contacts")
     finally:
         conn.close()
 
@@ -192,7 +199,7 @@ def add_contact():
         finally:
             conn.close()
         return redirect(url_for("list_contacts"))
-    return render_template_string(CONTACT_ADD_HTML, page="contacts")
+    return render_template("contact_add.html", page="contacts")
 
 
 @app.route("/contacts/<int:contact_id>/edit", methods=["GET", "POST"])
@@ -220,7 +227,7 @@ def edit_contact(contact_id):
             flash("Contact updated successfully", "success")
             return redirect(url_for("list_contacts"))
 
-        return render_template_string(CONTACT_EDIT_HTML, contact=contact, page="contacts")
+        return render_template("contact_edit.html", contact=contact, page="contacts")
     finally:
         conn.close()
 
@@ -248,7 +255,7 @@ def list_notes():
     conn = get_conn()
     try:
         notes = [dict(r) for r in search_notes(conn, q, limit=100)]
-        return render_template_string(NOTES_HTML, notes=notes, query=q, page="notes")
+        return render_template("notes.html", notes=notes, query=q, page="notes")
     finally:
         conn.close()
 
@@ -274,7 +281,7 @@ def add_note():
         finally:
             conn.close()
         return redirect(url_for("list_notes"))
-    return render_template_string(NOTE_ADD_HTML, page="notes")
+    return render_template("note_add.html", page="notes")
 
 
 @app.route("/notes/<int:note_id>/edit", methods=["GET", "POST"])
@@ -303,7 +310,7 @@ def edit_note(note_id):
             flash("Note updated successfully", "success")
             return redirect(url_for("list_notes"))
 
-        return render_template_string(NOTE_EDIT_HTML, note=note, page="notes")
+        return render_template("note_edit.html", note=note, page="notes")
     finally:
         conn.close()
 
@@ -377,6 +384,7 @@ def graph():
 # ---- Export / Import ----
 
 @app.route("/export")
+@require_login
 @require_api_key
 def export():
     fmt = request.args.get("format", "json")
@@ -394,6 +402,7 @@ def export():
 
 
 @app.route("/import", methods=["GET", "POST"])
+@require_login
 @require_api_key
 def import_brain():
     if request.method == "POST":

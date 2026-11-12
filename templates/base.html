@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Personal Brain Dashboard{% endblock %}</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f0f; color: #e0e0e0; margin: 0; padding: 0; }
+        header { background: #1a1a1a; border-bottom: 1px solid #333; padding: 1rem 2rem; }
+        header h1 { margin: 0; font-size: 1.25rem; color: #3b82f6; }
+        nav { display: flex; gap: 1.5rem; margin-top: 0.5rem; }
+        nav a { color: #888; text-decoration: none; font-size: 0.9rem; }
+        nav a:hover, nav a.active { color: #3b82f6; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+        .stats { display: flex; gap: 1rem; margin-bottom: 1.5rem; }
+        .stat-card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 1rem; flex: 1; }
+        .stat-card h3 { margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #888; }
+        .stat-card .value { font-size: 2rem; color: #3b82f6; }
+        .flash { padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
+        .flash.success { background: #064e3b; color: #d1fae5; border: 1px solid #10b981; }
+        .flash.error { background: #7f1d1d; color: #fecaca; border: 1px solid #ef4444; }
+        table { width: 100%; border-collapse: collapse; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #333; }
+        th { background: #111; color: #888; font-size: 0.85rem; }
+        tr:hover { background: #161616; }
+        .btn { background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 0.9rem; }
+        .btn:hover { background: #2563eb; }
+        .btn-danger { background: #ef4444; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
+        .form-group { margin-bottom: 1rem; }
+        .form-group label { display: block; margin-bottom: 0.25rem; color: #888; font-size: 0.9rem; }
+        .form-group input, .form-group textarea { width: 100%; background: #111; border: 1px solid #333; color: #e0e0e0; padding: 0.5rem; border-radius: 4px; }
+        .form-group textarea { min-height: 100px; }
+        .search-box { margin-bottom: 1.5rem; }
+        .search-box input[type="text"] { width: 100%; max-width: 500px; padding: 0.6rem; border: 1px solid #333; border-radius: 6px; background: #111; color: #e0e0e0; font-size: 1rem; }
+        .badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: #333; color: #888; }
+        .badge-person { background: #3b82f6; color: white; }
+        .badge-company { background: #10b981; color: white; }
+        .badge-concept { background: #8b5cf6; color: white; }
+        .relation-line { font-family: monospace; font-size: 0.85rem; }
+        .empty { text-align: center; color: #888; padding: 2rem; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🧠 Personal Brain Dashboard</h1>
+        <nav>
+            <a href="{{ url_for('index') }}" class="{% if page=='dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="{{ url_for('list_contacts') }}" class="{% if page=='contacts' %}active{% endif %}">Contacts</a>
+            <a href="{{ url_for('list_notes') }}" class="{% if page=='notes' %}active{% endif %}">Notes</a>
+            <a href="{{ url_for('search') }}" class="{% if page=='search' %}active{% endif %}">Search</a>
+            <a href="{{ url_for('graph') }}" class="{% if page=='graph' %}active{% endif %}">Knowledge Graph</a>
+            <a href="{{ url_for('conversations') }}" class="{% if page=='conversations' %}active{% endif %}">Conversations</a>
+            <a href="{{ url_for('export') }}?format=json" class="{% if page=='import' %}active{% endif %}">Export JSON</a>
+            <a href="{{ url_for('import_brain') }}" class="{% if page=='import' %}active{% endif %}">Import</a>
+            {% if session.get('user_id') %}
+            <a href="{{ url_for('logout') }}" style="margin-left:auto">Logout</a>
+            {% endif %}
+        </nav>
+    </header>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
