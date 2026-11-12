@@ -58,6 +58,13 @@ from brain_db import (
     export_brain_markdown,
     import_brain_json,
     search_entities,
+    upsert_contact_with_owner,
+    upsert_note_with_owner,
+    get_contacts_by_owner,
+    get_notes_by_owner,
+    detect_prompt_injection,
+    label_item,
+    get_contact,
     get_entity_relations,
 )
 
@@ -160,6 +167,11 @@ def logout():
     return redirect(url_for("login" if AUTH_ENABLED else "index"))
 
 
+def get_current_user_id():
+    """Ambil user_id dari session (username saat AUTH_ENABLED)."""
+    return session.get("user_id")
+
+
 # ----------------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------------
@@ -192,9 +204,13 @@ def index():
 @require_login
 def list_contacts():
     q = request.args.get("q", "")
+    user_id = get_current_user_id()
     conn = get_conn()
     try:
-        contacts = [dict(r) for r in search_contacts(conn, q, limit=100)]
+        if user_id:
+            contacts = [dict(r) for r in get_contacts_by_owner(conn, user_id, limit=100)]
+        else:
+            contacts = [dict(r) for r in search_contacts(conn, q, limit=100)]
         return render_template("contacts.html", contacts=contacts, query=q, page="contacts")
     finally:
         conn.close()
@@ -215,9 +231,19 @@ def add_contact():
             return redirect(url_for("add_contact"))
         conn = get_conn()
         try:
-            upsert_contact(conn, name=name, email=email, phone=phone,
-                           company=company, role=role,
-                           source="web", context_notes=notes)
+            user_id = get_current_user_id()
+            # Deteksi prompt-injection pada nama dan catatan
+            combined = f"{name} {notes or ''}"
+            is_inj, risk = detect_prompt_injection(combined)
+            prov_label = "prompt-injection" if is_inj else "manual"
+            cid = upsert_contact_with_owner(
+                conn, name=name, email=email, phone=phone,
+                company=company, role=role,
+                source="web", context_notes=notes,
+                owner_user_id=user_id,
+            )
+            label_item(conn, "contact", cid,
+                       provenance_label=prov_label, injection_risk=risk)
             flash("Contact added successfully", "success")
         finally:
             conn.close()
@@ -228,6 +254,7 @@ def add_contact():
 @app.route("/contacts/<int:contact_id>/edit", methods=["GET", "POST"])
 @require_login
 def edit_contact(contact_id):
+    user_id = get_current_user_id()
     conn = get_conn()
     try:
         from brain_db import get_contact
@@ -237,16 +264,27 @@ def edit_contact(contact_id):
             return redirect(url_for("list_contacts"))
         contact = dict(contact)
 
+        # Ownership enforcement: user hanya boleh edit kontak miliknya
+        if user_id and contact.get("owner_user_id") not in (None, user_id):
+            flash("You do not own this contact", "error")
+            return redirect(url_for("list_contacts"))
+
         if request.method == "POST":
-            update_contact(
-                conn, contact_id,
-                name=request.form.get("name", "").strip() or None,
-                email=request.form.get("email", "").strip() or None,
+            name = request.form.get("name", "").strip() or None
+            notes = request.form.get("notes", "").strip() or None
+            combined = f"{name or ''} {notes or ''}"
+            is_inj, risk = detect_prompt_injection(combined)
+            prov_label = "prompt-injection" if is_inj else "manual"
+            cid = upsert_contact_with_owner(
+                conn, name=name, email=request.form.get("email", "").strip() or None,
                 phone=request.form.get("phone", "").strip() or None,
                 company=request.form.get("company", "").strip() or None,
                 role=request.form.get("role", "").strip() or None,
-                context_notes=request.form.get("notes", "").strip() or None,
+                source="web", context_notes=notes,
+                owner_user_id=user_id,
             )
+            label_item(conn, "contact", cid,
+                       provenance_label=prov_label, injection_risk=risk)
             flash("Contact updated successfully", "success")
             return redirect(url_for("list_contacts"))
 
@@ -258,8 +296,17 @@ def edit_contact(contact_id):
 @app.route("/contacts/<int:contact_id>/delete", methods=["POST"])
 @require_login
 def delete_contact(contact_id):
+    user_id = get_current_user_id()
     conn = get_conn()
     try:
+        from brain_db import get_contact
+        contact = get_contact(conn, contact_id)
+        if not contact:
+            flash("Contact not found", "error")
+            return redirect(url_for("list_contacts"))
+        if user_id and contact.get("owner_user_id") not in (None, user_id):
+            flash("You do not own this contact", "error")
+            return redirect(url_for("list_contacts"))
         if delete_contact_db(conn, contact_id):
             flash("Contact deleted successfully", "success")
         else:
@@ -275,9 +322,13 @@ def delete_contact(contact_id):
 @require_login
 def list_notes():
     q = request.args.get("q", "")
+    user_id = get_current_user_id()
     conn = get_conn()
     try:
-        notes = [dict(r) for r in search_notes(conn, q, limit=100)]
+        if user_id:
+            notes = [dict(r) for r in get_notes_by_owner(conn, user_id, limit=100)]
+        else:
+            notes = [dict(r) for r in search_notes(conn, q, limit=100)]
         return render_template("notes.html", notes=notes, query=q, page="notes")
     finally:
         conn.close()
@@ -291,15 +342,22 @@ def add_note():
         content = request.form.get("content", "").strip()
         tags = request.form.get("tags", "").strip()
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+        user_id = get_current_user_id()
         conn = get_conn()
         try:
-            upsert_note(
+            combined = f"{title} {content}"
+            is_inj, risk = detect_prompt_injection(combined)
+            prov_label = "prompt-injection" if is_inj else "manual"
+            nid = upsert_note_with_owner(
                 conn, filename=request.form.get("filename", "web-note.md"),
                 file_path="web",
                 title=title or "(no title)",
                 content=content,
                 tags=tag_list,
+                owner_user_id=user_id,
             )
+            label_item(conn, "note", nid,
+                       provenance_label=prov_label, injection_risk=risk)
             flash("Note added successfully", "success")
         finally:
             conn.close()
@@ -310,6 +368,7 @@ def add_note():
 @app.route("/notes/<int:note_id>/edit", methods=["GET", "POST"])
 @require_login
 def edit_note(note_id):
+    user_id = get_current_user_id()
     conn = get_conn()
     try:
         from brain_db import get_contact  # noqa
@@ -322,14 +381,29 @@ def edit_note(note_id):
             return redirect(url_for("list_notes"))
         note = dict(row)
 
+        # Ownership enforcement
+        if user_id and note.get("owner_user_id") not in (None, user_id):
+            flash("You do not own this note", "error")
+            return redirect(url_for("list_notes"))
+
         if request.method == "POST":
-            update_note(
-                conn, note_id,
-                title=request.form.get("title", "").strip() or None,
-                content=request.form.get("content", "").strip() or None,
-                summary=request.form.get("summary", "").strip() or None,
-                tags=[t.strip() for t in request.form.get("tags", "").split(",") if t.strip()] or None,
+            title = request.form.get("title", "").strip() or None
+            content = request.form.get("content", "").strip() or None
+            summary = request.form.get("summary", "").strip() or None
+            tags = [t.strip() for t in request.form.get("tags", "").split(",") if t.strip()] or None
+            combined = f"{title or ''} {content or ''}"
+            is_inj, risk = detect_prompt_injection(combined)
+            prov_label = "prompt-injection" if is_inj else "manual"
+            nid = upsert_note_with_owner(
+                conn, filename=note.get("filename", "web-note.md"),
+                file_path="web",
+                title=title,
+                content=content,
+                tags=tags,
+                owner_user_id=user_id,
             )
+            label_item(conn, "note", nid,
+                       provenance_label=prov_label, injection_risk=risk)
             flash("Note updated successfully", "success")
             return redirect(url_for("list_notes"))
 
@@ -341,8 +415,19 @@ def edit_note(note_id):
 @app.route("/notes/<int:note_id>/delete", methods=["POST"])
 @require_login
 def delete_note(note_id):
+    user_id = get_current_user_id()
     conn = get_conn()
     try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        row = cur.fetchone()
+        if not row:
+            flash("Note not found", "error")
+            return redirect(url_for("list_notes"))
+        note = dict(row)
+        if user_id and note.get("owner_user_id") not in (None, user_id):
+            flash("You do not own this note", "error")
+            return redirect(url_for("list_notes"))
         if delete_note_db(conn, note_id):
             flash("Note deleted successfully", "success")
         else:
