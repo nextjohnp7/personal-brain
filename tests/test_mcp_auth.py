@@ -3,12 +3,25 @@
 import brain_mcp_server
 
 
-def test_no_auth_configured_allows_all(monkeypatch):
-    """When no API key is set, all scopes are allowed."""
+def test_no_auth_configured_denies_all(monkeypatch):
+    """Fail-closed: when no API key is set, all scopes are denied."""
     monkeypatch.setattr(brain_mcp_server, "EFFECTIVE_READ_KEY", "")
     monkeypatch.setattr(brain_mcp_server, "EFFECTIVE_WRITE_KEY", "")
-    assert brain_mcp_server._check_mcp_api_key("", scope="read") is None
-    assert brain_mcp_server._check_mcp_api_key("", scope="write") is None
+    err = brain_mcp_server._check_mcp_api_key("", scope="read")
+    assert err is not None
+    assert "not configured" in err
+    err = brain_mcp_server._check_mcp_api_key("", scope="write")
+    assert err is not None
+    assert "not configured" in err
+
+
+def test_missing_key_when_auth_configured(monkeypatch):
+    """When auth is configured but no key provided → denied."""
+    monkeypatch.setattr(brain_mcp_server, "EFFECTIVE_READ_KEY", "read-key-123")
+    monkeypatch.setattr(brain_mcp_server, "EFFECTIVE_WRITE_KEY", "")
+    err = brain_mcp_server._check_mcp_api_key("", scope="read")
+    assert err is not None
+    assert "Missing MCP API key" in err
 
 
 def test_read_key_allows_read_tools(monkeypatch):

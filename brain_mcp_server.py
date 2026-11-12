@@ -92,16 +92,30 @@ def _get_effective_key(api_key_param: str) -> str:
 
 
 def _check_mcp_api_key(api_key: str, scope: str = "read") -> str | None:
-    """Returns error message if API key invalid, None if valid (or auth disabled).
+    """Returns error message if API key invalid, None if valid.
+
+    Fail-closed: if no MCP API key is configured at all, all requests are denied.
+    If auth is configured but no key is provided, requests are also denied.
 
     Args:
         api_key: API key from parameter or header context
         scope: "read" for read-only tools, "write" for read-write tools
     """
     effective_key = _get_effective_key(api_key)
+
+    # Fail-closed: no keys configured at all → deny everything
+    if not EFFECTIVE_READ_KEY and not EFFECTIVE_WRITE_KEY:
+        return (
+            "MCP authentication not configured. "
+            "Set BRAIN_MCP_API_KEY_READ or BRAIN_MCP_API_KEY_WRITE."
+        )
+
+    # Missing key when auth is configured → deny
     if not effective_key:
-        # Auth not configured — allow all
-        return None
+        return (
+            "Missing MCP API key. "
+            "Provide api_key parameter or Authorization: Bearer header."
+        )
 
     read_key = EFFECTIVE_READ_KEY
     write_key = EFFECTIVE_WRITE_KEY
