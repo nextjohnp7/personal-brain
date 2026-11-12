@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from brain_db import (
     get_connection, upsert_contact, search_contacts, get_contact,
     upsert_note, search_notes, global_search, insert_knowledge_entry,
-    log_conversation,
+    log_conversation, create_user, get_user_by_username,
 )
 from brain_connectors import sync_markdown_notes
 
@@ -97,6 +97,48 @@ def search_all(conn):
     print(f"Knowledge: {len(results['knowledge'])}")
 
 
+def create_user_cmd(conn):
+    print("\n=== CREATE USER ===")
+    user_id = input("User ID (e.g. u1): ").strip()
+    username = input("Username: ").strip()
+    email = input("Email (optional): ").strip() or None
+    password = input("Password: ").strip()
+    role = input("Role (user/admin, default: user): ").strip() or "user"
+
+    if not user_id or not username or not password:
+        print("User ID, username, and password are required.")
+        return
+
+    if get_user_by_username(conn, username):
+        print(f"Username '{username}' already exists.")
+        return
+
+    # Simple hash placeholder — production uses werkzeug generate_password_hash
+    import hashlib
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+
+    try:
+        create_user(
+            conn, user_id=user_id, username=username,
+            email=email, password_hash=password_hash, role=role
+        )
+        print(f"User '{username}' created (ID: {user_id}, role: {role})")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+def list_users_cmd(conn):
+    print("\n=== USER LIST ===")
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, email, role, created_at FROM users ORDER BY id")
+    rows = cur.fetchall()
+    if not rows:
+        print("(no users yet)")
+        return
+    for r in rows:
+        print(f"#{r[0]} | {r[1]} | {r[2] or '-'} | {r[3]} | {r[4]}")
+
+
 def main():
     conn = get_connection()
     print("Local Brain ready. Database:", conn)
@@ -109,6 +151,8 @@ def main():
         print("4. Sync notes from folder")
         print("5. Search notes")
         print("6. Search entire brain")
+        print("7. Create user")
+        print("8. List all users")
         print("0. Exit")
 
         choice = input("\nSelect: ").strip()
@@ -125,6 +169,10 @@ def main():
             search_notes_cmd(conn)
         elif choice == '6':
             search_all(conn)
+        elif choice == '7':
+            create_user_cmd(conn)
+        elif choice == '8':
+            list_users_cmd(conn)
         elif choice == '0':
             print("Goodbye!")
             break
