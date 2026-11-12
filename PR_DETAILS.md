@@ -1,28 +1,38 @@
-# PR Details — Prioritas 5: CLI Tooling (Opsi A)
+# PR Details — Prioritas 1: Gmail failed-message checkpoint (Critical)
 
 ## Commit
-`[pending]` — `feat(prioritas5): CLI tooling - rotate key + user management`
+`[pending]` — `fix(prioritas1): Gmail failed-message checkpoint`
 
 ## Ringkasan Perubahan
-- `scripts/rotate_key.py` (baru): CLI rotate SQLCipher encryption key
-  * `--old-key` / env `BRAIN_DB_KEY` for current key
-  * `--new-key` or auto-generate new base64 32-byte key
-  * Wraps `brain_db.rotate_db_key()`
-- `manage_brain.py`: Tambah manajemen user (menu 7 & 8)
-  * `create_user_cmd()`: buat user baru (id, username, email, password, role)
-  * `list_users_cmd()`: daftar semua user dengan role dan created_at
-  * Import `create_user`, `get_user_by_username` dari `brain_db`
+- `src/brain_db.py`:
+  * Tabel baru `gmail_failed_messages` (message_id PK, error_message,
+    failed_at, retry_count, last_retry_at)
+  * `record_failed_gmail_message(conn, message_id, error_message)` —
+    catat pesan gagal, increment retry_count pada duplikasi
+  * `get_failed_gmail_messages(conn)` — ambil semua pesan menunggu retry,
+    urutkan by failed_at ASC
+  * `clear_failed_gmail_message(conn, message_id)` — hapus setelah retry
+    berhasil
+- `brain_sync_daemon.py`:
+  * Sebelum sinkronisasi normal, coba ulang pesan gagal dari run sebelumnya
+  * Saat `_process_gmail_message` gagal (history loop dan timestamp
+    fallback), catat ke `gmail_failed_messages` bukan cuma di-log
+  * Saat retry berhasil, hapus dari daftar gagal
+- `tests/test_security.py`:
+  * `test_failed_gmail_message_roundtrip` — catat, ambil, update
+    retry_count, hapus
+  * `test_failed_gmail_message_ordering` — urutkan by failed_at
+  * `test_clear_nonexistent_failed_gmail_message` — tidak error
 
 ## Files Diubah
 | File | Perubahan |
 |------|-----------|
-| `scripts/rotate_key.py` | Baru — CLI rotate encryption key |
-| `manage_brain.py` | Tambah create user + list user menu |
+| `src/brain_db.py` | Tabel gmail_failed_messages + 3 fungsi |
+| `brain_sync_daemon.py` | Retry pesan gagal + catat kegagalan |
+| `tests/test_security.py` | 3 tes failed-message checkpoint |
 
 ## Test Result
-79/79 test lulus (lokal)
-Rotate key verifikasi manual: PASSED (contact tersimpan di DB baru dengan kunci baru)
-manage_brain.py import: OK
+82/82 test lulus (lokal)
 
 ## Status
-Prioritas 5 — CLI Tooling (Opsi A) SELESAI. Siap untuk review dan merge ke `main`.
+Prioritas 1 — Gmail failed-message checkpoint SELESAI. Siap untuk review dan merge ke `main`.

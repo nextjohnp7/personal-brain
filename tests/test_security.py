@@ -179,4 +179,65 @@ def test_embed_text_cache_returns_same_vector():
     assert len(be._embed_cache) <= be._EMBED_CACHE_MAX
 
 
+# ---------- Prioritas 1 — Gmail failed-message checkpoint ----------
+def test_failed_gmail_message_roundtrip(db_mode):
+    """P1-01: Gagal memproses pesan Gmail harus dicatat dan dapat diambil ulang."""
+    conn = db_mode.get_connection()
+    try:
+        # Awalnya tidak ada pesan gagal
+        assert db_mode.get_failed_gmail_messages(conn) == []
+
+        # Catat pesan gagal
+        db_mode.record_failed_gmail_message(
+            conn, "msg-123", "temporary network error"
+        )
+        failed = db_mode.get_failed_gmail_messages(conn)
+        assert len(failed) == 1
+        assert failed[0]["message_id"] == "msg-123"
+        assert failed[0]["error_message"] == "temporary network error"
+        assert failed[0]["retry_count"] == 1
+        assert failed[0]["failed_at"] is not None
+
+        # Catat lagi pesan yang sama — retry_count harus bertambah
+        db_mode.record_failed_gmail_message(conn, "msg-123", "timeout")
+        failed = db_mode.get_failed_gmail_messages(conn)
+        assert len(failed) == 1  # masih satu baris, di-update
+        assert failed[0]["retry_count"] == 2
+        assert failed[0]["error_message"] == "timeout"
+
+        # Hapus setelah berhasil dicoba ulang
+        db_mode.clear_failed_gmail_message(conn, "msg-123")
+        assert db_mode.get_failed_gmail_messages(conn) == []
+    finally:
+        conn.close()
+
+
+def test_failed_gmail_message_ordering(db_mode):
+    """P1-01: Pesan gagal diurutkan berdasarkan failed_at (terlama dulu)."""
+    conn = db_mode.get_connection()
+    try:
+        import time
+
+        db_mode.record_failed_gmail_message(conn, "msg-b", "error b")
+        time.sleep(0.01)
+        db_mode.record_failed_gmail_message(conn, "msg-a", "error a")
+
+        failed = db_mode.get_failed_gmail_messages(conn)
+        assert len(failed) == 2
+        assert failed[0]["message_id"] == "msg-b"  # lebih lama dulu
+        assert failed[1]["message_id"] == "msg-a"
+    finally:
+        conn.close()
+
+
+def test_clear_nonexistent_failed_gmail_message(db_mode):
+    """P1-01: Menghapus pesan gagal yang tidak ada tidak menyebabkan error."""
+    conn = db_mode.get_connection()
+    try:
+        db_mode.clear_failed_gmail_message(conn, "msg-does-not-exist")
+        assert db_mode.get_failed_gmail_messages(conn) == []
+    finally:
+        conn.close()
+
+
 

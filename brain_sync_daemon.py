@@ -31,6 +31,9 @@ from brain_db import (
     insert_email,
     upsert_calendar_event,
     update_contact_interaction,
+    record_failed_gmail_message,
+    get_failed_gmail_messages,
+    clear_failed_gmail_message,
 )
 from brain_connectors import (
     _extract_email,
@@ -261,6 +264,27 @@ def sync_gmail_once(conn, creds, state):
 
     mark_sync_started(state, "gmail")
     try:
+        # ------------------- Retry previously failed messages ----------------
+        failed = get_failed_gmail_messages(conn)
+        for entry in failed:
+            msg_id = entry["message_id"]
+            try:
+                msg_data = (
+                    service.users().messages()
+                    .get(userId="me", id=msg_id, format="metadata")
+                    .execute()
+                )
+                _process_gmail_message(conn, service, msg_data, stats)
+                clear_failed_gmail_message(conn, msg_id)
+                logger.info(f"Gmail retry success: {msg_id}")
+                stats["new_messages"] = stats.get("new_messages", 0) + 1
+            except Exception as e:
+                logger.warning(
+                    f"Gmail retry still failed: {msg_id} — {e}"
+                )
+                # record_failed_gmail_message will increment retry_count
+                record_failed_gmail_message(conn, msg_id, str(e))
+
         # ------------------- First run: initialize historyId ----------------
         if not last_history_id:
             try:
@@ -317,12 +341,18 @@ def sync_gmail_once(conn, creds, state):
                 # New messages added
                 for msg_added in record.get("messagesAdded", []):
                     msg = msg_added.get("message", {})
+                    msg_id = msg.get("id")
+                    if not msg_id:
+                        continue
                     try:
                         _process_gmail_message(conn, service, msg, stats)
+                        # Message processed successfully — clear from failed list if present
+                        clear_failed_gmail_message(conn, msg_id)
                     except Exception as e:
                         logger.error(
-                            f"Failed to process Gmail message {msg.get('id')}: {e}"
+                            f"Failed to process Gmail message {msg_id}: {e}"
                         )
+                        record_failed_gmail_message(conn, msg_id, str(e))
 
                 # Messages deleted
                 for msg_deleted in record.get("messagesDeleted", []):
@@ -402,9 +432,12 @@ def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
                             except Exception:
                                 pass
                 except Exception as e:
+                    msg_id = msg.get("id")
                     logger.error(
-                        f"Failed to process Gmail message {msg.get('id')}: {e}"
+                        f"Failed to process Gmail message {msg_id}: {e}"
                     )
+                    if msg_id:
+                        record_failed_gmail_message(conn, msg_id, str(e))
 
             page_token = result.get("nextPageToken")
             if not page_token:

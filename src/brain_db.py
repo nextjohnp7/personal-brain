@@ -178,6 +178,55 @@ def insert_email(conn, message_id, thread_id, sender, recipient, subject, body,
     return cur.lastrowid
 
 
+def record_failed_gmail_message(conn, message_id, error_message):
+    """Record a Gmail message that failed processing, for retry on next run.
+
+    Uses INSERT OR REPLACE so retrying the same failed message updates
+    the error message and increments retry_count.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO gmail_failed_messages (message_id, error_message, failed_at, retry_count, last_retry_at)
+        VALUES (?, ?, datetime('now'), 1, datetime('now'))
+        ON CONFLICT(message_id) DO UPDATE SET
+            error_message = excluded.error_message,
+            failed_at = datetime('now'),
+            retry_count = retry_count + 1,
+            last_retry_at = datetime('now')
+    """, (message_id, str(error_message)))
+    conn.commit()
+
+
+def get_failed_gmail_messages(conn):
+    """Return list of dicts for all Gmail messages awaiting retry."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT message_id, error_message, failed_at, retry_count, last_retry_at
+        FROM gmail_failed_messages
+        ORDER BY failed_at ASC
+    """)
+    rows = cur.fetchall()
+    return [
+        {
+            "message_id": r[0],
+            "error_message": r[1],
+            "failed_at": r[2],
+            "retry_count": r[3],
+            "last_retry_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+def clear_failed_gmail_message(conn, message_id):
+    """Remove a message from the failed list after successful retry."""
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM gmail_failed_messages WHERE message_id = ?", (message_id,)
+    )
+    conn.commit()
+
+
 def search_emails(conn, query, limit=20, offset=0):
     """Search emails by subject, body, sender, or recipient."""
     cur = conn.cursor()
@@ -1105,6 +1154,17 @@ def _create_tables(conn):
             contact_id INTEGER,    -- FK to contacts
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (contact_id) REFERENCES contacts(id)
+        )
+    """)
+
+    # Gmail messages that failed processing — checkpoint for retry on next run
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS gmail_failed_messages (
+            message_id TEXT PRIMARY KEY,
+            error_message TEXT,
+            failed_at TEXT DEFAULT (datetime('now')),
+            retry_count INTEGER DEFAULT 0,
+            last_retry_at TEXT
         )
     """)
 
