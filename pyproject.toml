@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.3", "mypy>=1.8", "coverage>=7.6"]
+dev = ["pytest>=8.0", "ruff>=0.17.4", "mypy>=1.8", "coverage>=7.6"]
 embeddings = ["torch>=2.1", "transformers>=4.35"]
 
 [project.scripts]
