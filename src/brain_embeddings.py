@@ -23,6 +23,12 @@ _tokenizer = None
 _embedding_dim = 384  # all-MiniLM-L6-v2 output dimension
 _model_version = None  # Track which model produced embeddings
 
+# Embedding cache: text -> tuple of floats. Avoids re-embedding the same
+# string on every call (e.g. repeated search queries, rebuild loops).
+# Capped at _EMBED_CACHE_MAX to prevent unbounded memory growth.
+_embed_cache: dict = {}
+_EMBED_CACHE_MAX = 1000
+
 
 def _load_model():
     """Lazy-load the sentence-transformers model."""
@@ -81,22 +87,38 @@ def embed_text(text: str) -> List[float]:
 
     Returns a list of floats (384 dimensions for all-MiniLM-L6-v2).
     Falls back to TF-IDF if model unavailable.
+
+    Results are cached in `_embed_cache` so the same string is never
+    re-embedded twice within a process (bounded by _EMBED_CACHE_MAX).
     """
+    # Cache hit: return a copy so callers can't mutate the cached vector.
+    if text in _embed_cache:
+        return list(_embed_cache[text])
+
     model, tokenizer = _load_model()
 
     if model == "tfidf_fallback":
-        return _tfidf_embed(text)
+        vector = _tfidf_embed(text)
+    else:
+        import torch
 
-    import torch
+        inputs = tokenizer(
+            text, padding=True, truncation=True, return_tensors="pt", max_length=512
+        )
+        with torch.no_grad():
+            outputs = model(**inputs)
+            # Attention-mask-aware mean pooling
+            embedding = _mean_pool_with_attention_mask(
+                outputs, inputs["attention_mask"]
+            )
+        vector = embedding[0].tolist()
 
-    inputs = tokenizer(
-        text, padding=True, truncation=True, return_tensors="pt", max_length=512
-    )
-    with torch.no_grad():
-        outputs = model(**inputs)
-        # Attention-mask-aware mean pooling
-        embedding = _mean_pool_with_attention_mask(outputs, inputs["attention_mask"])
-    return embedding[0].tolist()
+    # Store in cache (as tuple, hashable/immutable). Evict oldest if full.
+    if len(_embed_cache) >= _EMBED_CACHE_MAX:
+        _embed_cache.pop(next(iter(_embed_cache)))
+    _embed_cache[text] = tuple(vector)
+
+    return vector
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:

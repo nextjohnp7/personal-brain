@@ -448,12 +448,22 @@ def semantic_search(conn, query, limit=10):
     """Semantic search using real embeddings + cosine similarity.
 
     Returns list of dicts with source_type, source_id, content_chunk, similarity.
+
+    Performance: fetches a capped batch of recent embeddings from the DB
+    (instead of all rows), computes cosine similarity in Python on that
+    subset, then returns the top `limit` results. This bounds the O(n)
+    Python-side work as the embedding table grows.
     """
     query_vector = embed_text(query)
 
+    # Cap the Python-side similarity computation so it stays bounded as the
+    # embeddings table grows. Prioritize recent content.
+    prefetch_limit = max(limit * 20, 500)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, source_type, source_id, content_chunk, embedding_json FROM embeddings"
+        "SELECT id, source_type, source_id, content_chunk, embedding_json FROM embeddings "
+        "ORDER BY created_at DESC LIMIT ?",
+        (prefetch_limit,),
     )
     rows = cur.fetchall()
 
@@ -1235,6 +1245,25 @@ def _create_tables(conn):
         )
     """)
 
+    # ===== Indexes for query performance =====
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(sender)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_recipient ON emails(recipient)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_received_at ON emails(received_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_title ON notes(title)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes(updated_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_title ON knowledge_entries(title)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_created_at ON knowledge_entries(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_entity_relations_source ON entity_relations(source_entity_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_entity_relations_target ON entity_relations(target_entity_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_entity_relations_type ON entity_relations(relation_type)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_source_type ON embeddings(source_type)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_provenance_subject ON provenance_entries(subject_type, subject_id)")
+
     conn.commit()
     _ensure_item_label_columns(conn)
     _ensure_provenance_columns(conn)
@@ -1623,6 +1652,10 @@ def _create_access_control_tables(conn):
             UNIQUE(item_type, item_id, shared_with_user_id)
         )
     """)
+
+    # Indexes for item_shares access-control lookups
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_item_shares_item ON item_shares(item_type, item_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_item_shares_user ON item_shares(shared_with_user_id)")
 
     conn.commit()
     _ensure_access_control_columns(conn)
@@ -2292,6 +2325,9 @@ def backup_brain_db(backup_path=None):
 
     conn = get_connection()
     try:
+        # Checkpoint WAL so the backup captures all committed data in the
+        # main database file (not left in the WAL sidecar).
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute(f"VACUUM INTO '{backup_path.as_posix()}'")
     finally:
         conn.close()
