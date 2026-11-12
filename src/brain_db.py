@@ -403,14 +403,18 @@ def store_embedding(conn, source_type, source_id, content_chunk):
 
     Uses sentence-transformers/all-MiniLM-L6-v2 (384-dim).
     Falls back to TF-IDF if model unavailable.
+    Records model_version for migration tracking.
     """
+    from brain_embeddings import get_embedding_version
+
     vector = embed_text(content_chunk)
+    model_version = get_embedding_version()
 
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO embeddings (source_type, source_id, content_chunk, embedding_json) "
-        "VALUES (?, ?, ?, ?)",
-        (source_type, source_id, content_chunk, json.dumps(vector))
+        "INSERT INTO embeddings (source_type, source_id, content_chunk, embedding_json, model_version) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (source_type, source_id, content_chunk, json.dumps(vector), model_version)
     )
     conn.commit()
     return cur.lastrowid
@@ -449,6 +453,71 @@ def semantic_search(conn, query, limit=10):
 
     results.sort(key=lambda x: x["similarity"], reverse=True)
     return results[:limit]
+
+
+def rebuild_embeddings(conn, source_type=None):
+    """Rebuild semua embedding dari scratch untuk source_type tertentu
+    (atau semua jika source_type=None).
+
+    Berguna saat model embedding berubah atau data embedded korem.
+    Hapus embedding lama lalu hitung ulang dari konten asli.
+    """
+    from brain_embeddings import get_embedding_version
+
+    cur = conn.cursor()
+
+    # Kumpulkan semua content_chunk yang perlu di-re-embed
+    if source_type:
+        cur.execute(
+            "SELECT id, source_type, source_id, content_chunk FROM embeddings WHERE source_type = ?",
+            (source_type,),
+        )
+    else:
+        cur.execute(
+            "SELECT id, source_type, source_id, content_chunk FROM embeddings"
+        )
+    rows = cur.fetchall()
+
+    if not rows:
+        return 0
+
+    model_version = get_embedding_version()
+    rebuilt = 0
+
+    for row in rows:
+        emb_id, src_type, src_id, content = row
+        vector = embed_text(content)
+        cur.execute(
+            "UPDATE embeddings SET embedding_json = ?, model_version = ? WHERE id = ?",
+            (json.dumps(vector), model_version, emb_id),
+        )
+        rebuilt += 1
+
+    conn.commit()
+    return rebuilt
+
+
+def get_embedding_version_db(conn):
+    """Ambil model_version yang digunakan untuk embedding di database."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT DISTINCT model_version FROM embeddings WHERE model_version IS NOT NULL LIMIT 1"
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def embedding_version_mismatch(conn):
+    """Periksa apakah ada embedding dengan model_version yang berbeda
+    dari model yang sedang aktif. Mengembalikan (bool, active_version, db_version)."""
+    from brain_embeddings import get_embedding_version
+
+    active = get_embedding_version()
+    db = get_embedding_version_db(conn)
+    return (active != db, active, db)
 
 
 # =====================================================================
@@ -950,6 +1019,15 @@ def _ensure_provenance_columns(conn):
     conn.commit()
 
 
+def _ensure_embedding_columns(conn):
+    """Add model_version column to embeddings table if missing (idempotent)."""
+    cur = conn.cursor()
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(embeddings)").fetchall()}
+    if "model_version" not in cols:
+        cur.execute("ALTER TABLE embeddings ADD COLUMN model_version TEXT")
+        conn.commit()
+
+
 def _create_tables(conn):
     """Initialize all brain tables."""
     cur = conn.cursor()
@@ -1127,6 +1205,7 @@ def _create_tables(conn):
             source_id INTEGER,
             content_chunk TEXT,
             embedding_json TEXT,
+            model_version TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         )
     """)
@@ -1134,6 +1213,7 @@ def _create_tables(conn):
     conn.commit()
     _ensure_item_label_columns(conn)
     _ensure_provenance_columns(conn)
+    _ensure_embedding_columns(conn)
 
 
 def _ensure_item_label_columns(conn):
