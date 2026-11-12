@@ -1,20 +1,24 @@
-# PR Details — F-02: MCP Fail-closed Auth
+# PR Details — F-03: Dashboard Auth Fail-closed
 
 ## Commit
-`622008c` — `fix(security): F-02 MCP fail-closed auth - API key wajib`
+`d4d6d8e` — `fix(security): F-03 Dashboard auth fail-closed - kredensial wajib`
 
 ## Ringkasan Perubahan
-- `_check_mcp_api_key()` di `brain_mcp_server.py` sekarang deny-all jika tidak ada kunci MCP yang dikonfigurasi (fail-closed)
-- Missing key saat auth aktif → ditolak dengan pesan "Missing MCP API key"
-- Tanpa `BRAIN_MCP_API_KEY_READ`/`BRAIN_MCP_API_KEY_WRITE`, semua request MCP ditolak
-- Test `test_no_auth_configured_allows_all` diubah menjadi `test_no_auth_configured_denies_all`
-- Test baru `test_missing_key_when_auth_configured` ditambahkan
+- `brain_web_dashboard.py`:
+  * AUTH_ENABLED selalu True; raise ValueError jika BRAIN_DASHBOARD_USER/
+    BRAIN_DASHBOARD_PASSWORD_HASH tidak dikonfigurasi
+  * require_login selalu enforce session (tanpa kondisi AUTH_ENABLED)
+  * Hapus cek 'if not AUTH_ENABLED' di login route
+- Tests: semua fixture dan test routes diupdate untuk login sebelum mengakses
+  pages yang dilindungi (conftest.py, test_routes.py, test_security.py)
 
 ## Files Diubah
 | File | Perubahan |
 |------|-----------|
-| `brain_mcp_server.py` | Fail-closed MCP auth: deny-all when no keys configured |
-| `tests/test_mcp_auth.py` | Updated + new test for missing key |
+| `brain_web_dashboard.py` | Fail-closed dashboard auth: always-on, no auth-off mode |
+| `tests/conftest.py` | Dashboard fixture sets test credentials via env vars |
+| `tests/test_routes.py` | Login helper added; all page tests login first |
+| `tests/test_security.py` | CSRF test uses logged_in_client fixture |
 
 ## Test Result
 73/73 test lulus (lokal)

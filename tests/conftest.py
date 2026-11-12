@@ -14,6 +14,7 @@ def dashboard(monkeypatch, tmp_path):
     monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")  # test key, encrypted mode
     monkeypatch.setenv("BRAIN_DASHBOARD_USER", "tester")
     monkeypatch.setenv("BRAIN_DASHBOARD_PASSWORD", "rahasia-test-123")
+    monkeypatch.setenv("BRAIN_API_KEY", "test-api-key-123")
 
     import brain_db
     monkeypatch.setattr(brain_db, "DB_PATH", tmp_path / "brain_test.db")
@@ -22,7 +23,6 @@ def dashboard(monkeypatch, tmp_path):
     monkeypatch.setattr(brain_db, "embed_text", lambda text: [float(len(text) % 7)] * 8)
 
     import brain_web_dashboard as dash
-    monkeypatch.setattr(dash, "BRAIN_API_KEY", "")
     dash.app.config["TESTING"] = True
     dash.app.config["WTF_CSRF_ENABLED"] = False
     dash.app.config["RATELIMIT_ENABLED"] = False

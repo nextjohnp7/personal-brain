@@ -15,7 +15,7 @@ def _login(c):
 def test_page_renders(client, path):
     """Regression guard: every page must render (no NameError/500)."""
     _login(client)
-    resp = client.get(path)
+    resp = client.get(path, headers={"X-API-Key": "test-api-key-123"})
     assert resp.status_code == 200, f"GET {path} -> {resp.status_code}"
 
 
@@ -48,7 +48,8 @@ def test_export_requires_login(auth_dashboard):
 
 
 def test_login_then_export_json(logged_in_client):
-    resp = logged_in_client.get("/export?format=json")
+    resp = logged_in_client.get("/export?format=json",
+                                headers={"X-API-Key": "test-api-key-123"})
     assert resp.status_code == 200
     assert "contacts" in resp.get_json()
 
@@ -62,11 +63,10 @@ def test_login_wrong_password(auth_dashboard):
 
 # ---- API key ----
 
-def test_api_key_enforced(dashboard, monkeypatch):
-    monkeypatch.setattr(dashboard, "BRAIN_API_KEY", "kunci-rahasia")
+def test_api_key_enforced(dashboard):
     c = dashboard.app.test_client()
     _login(c)
     assert c.get("/api/search?q=x").status_code == 401
     assert c.get("/api/search?q=x", headers={"X-API-Key": "salah"}).status_code == 401
-    ok = c.get("/api/search?q=x", headers={"X-API-Key": "kunci-rahasia"})
+    ok = c.get("/api/search?q=x", headers={"X-API-Key": "test-api-key-123"})
     assert ok.status_code == 200

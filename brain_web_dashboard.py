@@ -103,8 +103,13 @@ def _is_safe_url(target):
     test = urlparse(urljoin(request.host_url, target))
     return test.scheme in ("http", "https") and test.netloc == ref.netloc
 
-# Simple API key protection for sharing
+# Simple API key protection for sharing (fail-closed: always required)
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
+if not BRAIN_API_KEY:
+    raise ValueError(
+        "BRAIN_API_KEY environment variable is required. "
+        "Export/import endpoints are protected by API key."
+    )
 
 # Web dashboard authentication (fail-closed: always required)
 DASHBOARD_USER = os.environ.get("BRAIN_DASHBOARD_USER", "")
@@ -136,15 +141,14 @@ def require_login(f):
 
 
 def require_api_key(f):
-    """Decorator to require API key if BRAIN_API_KEY is set."""
+    """Decorator to require API key (always enforced — fail-closed)."""
     from functools import wraps
 
     @wraps(f)
     def decorated(*args, **kwargs):
-        if BRAIN_API_KEY:
-            provided = request.headers.get("X-API-Key", "") or request.args.get("api_key", "")
-            if not provided or not hmac.compare_digest(provided, BRAIN_API_KEY):
-                return jsonify({"error": "Invalid or missing API key"}), 401
+        provided = request.headers.get("X-API-Key", "") or request.args.get("api_key", "")
+        if not provided or not hmac.compare_digest(provided, BRAIN_API_KEY):
+            return jsonify({"error": "Invalid or missing API key"}), 401
         return f(*args, **kwargs)
     return decorated
 
