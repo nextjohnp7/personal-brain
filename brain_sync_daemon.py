@@ -519,7 +519,7 @@ def run_once(do_notes=True, do_gmail=True, do_calendar=True,
     logger.info("Single sync complete")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Brain Sync Daemon")
     parser.add_argument(
         "--interval",
@@ -570,3 +570,7 @@ if __name__ == "__main__":
             do_calendar=not args.no_calendar,
             notes_folder=args.folder,
         )
+
+
+if __name__ == "__main__":
+    main()
