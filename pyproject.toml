@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personal-brain"
+version = "0.1.0"
+description = "Local-first encrypted second brain for AI agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "flask>=3.0",
+    "flask-wtf>=1.2",
+    "flask-limiter>=3.5",
+    "cryptography>=42.0",
+    "sqlcipher3-binary>=0.2.0",
+    "requests>=2.31",
+    "google-api-python-client>=2.100",
+    "google-auth>=2.23",
+    "google-auth-oauthlib>=1.1",
+    "google-auth-httplib2>=0.2",
+    "mcp>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.3", "mypy>=1.8", "coverage>=7.6"]
+embeddings = ["torch>=2.1", "transformers>=4.35"]
+
+[project.scripts]
+brain-dashboard = "brain_web_dashboard:main"
+brain-mcp = "brain_mcp_server:main"
+brain-sync = "brain_sync_daemon:main"
+brain-voice = "brain_voice:main"
+brain-manage = "manage_brain:main"
+brain-migrate = "migrate_to_sqlcipher:main"
+
+[tool.setuptools]
+py-modules = [
+    "brain_web_dashboard", "brain_mcp_server",
+    "brain_sync_daemon", "brain_voice",
+    "manage_brain", "migrate_to_sqlcipher",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
