@@ -1,38 +1,34 @@
-# PR Details — Prioritas 1: Gmail failed-message checkpoint (Critical)
+# PR Details — Prioritas 2: Migrasi plaintext cleanup (Critical)
 
 ## Commit
-`[pending]` — `fix(prioritas1): Gmail failed-message checkpoint`
+`[pending]` — `fix(prioritas2): Migrasi plaintext cleanup`
 
 ## Ringkasan Perubahan
 - `src/brain_db.py`:
-  * Tabel baru `gmail_failed_messages` (message_id PK, error_message,
-    failed_at, retry_count, last_retry_at)
-  * `record_failed_gmail_message(conn, message_id, error_message)` —
-    catat pesan gagal, increment retry_count pada duplikasi
-  * `get_failed_gmail_messages(conn)` — ambil semua pesan menunggu retry,
-    urutkan by failed_at ASC
-  * `clear_failed_gmail_message(conn, message_id)` — hapus setelah retry
-    berhasil
-- `brain_sync_daemon.py`:
-  * Sebelum sinkronisasi normal, coba ulang pesan gagal dari run sebelumnya
-  * Saat `_process_gmail_message` gagal (history loop dan timestamp
-    fallback), catat ke `gmail_failed_messages` bukan cuma di-log
-  * Saat retry berhasil, hapus dari daftar gagal
-- `tests/test_security.py`:
-  * `test_failed_gmail_message_roundtrip` — catat, ambil, update
-    retry_count, hapus
-  * `test_failed_gmail_message_ordering` — urutkan by failed_at
-  * `test_clear_nonexistent_failed_gmail_message` — tidak error
+  * `DB_PATH` diubah dari `"brain.db"` ke `"brain.db.enc"` — aplikasi
+    sekarang membuka database terenkripsi dengan ekstensi `.enc`
+  * `ENCRYPTED_PATH` tetap menunjuk ke `"brain.db.enc"` (tidak ada
+    duplikasi)
+- File fisik di disk:
+  * `brain.db` di-rename menjadi `brain.db.enc` (197 KB, SQLCipher
+    encrypted)
+  * Tidak ada plaintext `brain.db` yang tersisa di disk
+- `.gitignore`: sudah mencakup `brain.db`, `brain.db.enc`,
+  `brain.db-wal`, `brain.db-shm`, `brain.db.enc.bak` (tidak perlu
+  perubahan)
 
 ## Files Diubah
 | File | Perubahan |
 |------|-----------|
-| `src/brain_db.py` | Tabel gmail_failed_messages + 3 fungsi |
-| `brain_sync_daemon.py` | Retry pesan gagal + catat kegagalan |
-| `tests/test_security.py` | 3 tes failed-message checkpoint |
+| `src/brain_db.py` | DB_PATH → brain.db.enc |
 
 ## Test Result
 82/82 test lulus (lokal)
 
+## Verifikasi
+- `brain.db` plaintext: TIDAK ADA di disk ✓
+- `brain.db.enc`: TERSEDIA di disk ✓
+- `.gitignore`: mencakup kedua file ✓
+
 ## Status
-Prioritas 1 — Gmail failed-message checkpoint SELESAI. Siap untuk review dan merge ke `main`.
+Prioritas 2 — Migrasi plaintext cleanup SELESAI. Siap untuk review dan merge ke `main`.

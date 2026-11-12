@@ -16,7 +16,7 @@ from brain_embeddings import embed_text, cosine_similarity as _cosine_similarity
 
 # Database location at project root
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-DB_PATH = PROJECT_ROOT / "brain.db"
+DB_PATH = PROJECT_ROOT / "brain.db.enc"
 ENCRYPTED_PATH = PROJECT_ROOT / "brain.db.enc"
 
 # Allowlist of characters permitted in table names (defense-in-depth for
