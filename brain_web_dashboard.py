@@ -35,6 +35,7 @@ from flask_limiter.util import get_remote_address
 
 from brain_db import (
     get_connection,
+    DB_PATH,
     search_contacts,
     search_notes,
     search_knowledge,
@@ -66,6 +67,12 @@ from brain_db import (
     label_item,
     get_contact,
     get_entity_relations,
+    count_contacts,
+    count_notes,
+    count_knowledge,
+    count_emails,
+    count_events,
+    get_db_stats,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -170,6 +177,23 @@ def logout():
 def get_current_user_id():
     """Ambil user_id dari session (username saat AUTH_ENABLED)."""
     return session.get("user_id")
+
+
+@app.route("/health")
+def health():
+    """Health endpoint — returns DB status and record counts."""
+    conn = get_conn()
+    try:
+        stats = get_db_stats(conn)
+        return jsonify({
+            "status": "ok",
+            "database": str(DB_PATH),
+            "tables": stats,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+    finally:
+        conn.close()
 
 
 # ----------------------------------------------------------------------
@@ -443,9 +467,24 @@ def delete_note(note_id):
 @require_login
 def search():
     q = request.args.get("q", "")
+    page = int(request.args.get("page", "1") or "1")
+    per_page = int(request.args.get("per_page", "20") or "20")
+    offset = (page - 1) * per_page
     conn = get_conn()
     try:
-        results = global_search(conn, q, limit=20) if q else None
+        results = global_search(conn, q, limit=per_page) if q else None
+        # Add pagination counts
+        if q and results:
+            results["_pagination"] = {
+                "page": page,
+                "per_page": per_page,
+                "offset": offset,
+                "total_contacts": count_contacts(conn, q),
+                "total_notes": count_notes(conn, q),
+                "total_knowledge": count_knowledge(conn, q),
+                "total_emails": count_emails(conn, q),
+                "total_events": count_events(conn),
+            }
         semantic = semantic_search(conn, q, limit=10) if q else None
         graph = query_knowledge_graph(conn, q, limit=10) if q else None
         return render_template("search.html", query=q, results=results,

@@ -102,7 +102,7 @@ def get_contact(conn, contact_id):
     return cur.fetchone()
 
 
-def search_contacts(conn, query, limit=20):
+def search_contacts(conn, query, limit=20, offset=0):
     """Search contacts by name, email, or notes."""
     cur = conn.cursor()
     like = f"%{query}%"
@@ -110,9 +110,20 @@ def search_contacts(conn, query, limit=20):
         SELECT * FROM contacts
         WHERE name LIKE ? OR email LIKE ? OR company LIKE ? OR context_notes LIKE ?
         ORDER BY name
-        LIMIT ?
-    """, (like, like, like, like, limit))
+        LIMIT ? OFFSET ?
+    """, (like, like, like, like, limit, offset))
     return cur.fetchall()
+
+
+def count_contacts(conn, query=""):
+    """Count total contacts matching query (for pagination)."""
+    cur = conn.cursor()
+    like = f"%{query}%"
+    cur.execute("""
+        SELECT count(*) FROM contacts
+        WHERE name LIKE ? OR email LIKE ? OR company LIKE ? OR context_notes LIKE ?
+    """, (like, like, like, like))
+    return cur.fetchone()[0]
 
 
 def update_contact_interaction(conn, contact_id):
@@ -143,7 +154,7 @@ def insert_email(conn, message_id, thread_id, sender, recipient, subject, body,
     return cur.lastrowid
 
 
-def search_emails(conn, query, limit=20):
+def search_emails(conn, query, limit=20, offset=0):
     """Search emails by subject, body, sender, or recipient."""
     cur = conn.cursor()
     like = f"%{query}%"
@@ -151,9 +162,20 @@ def search_emails(conn, query, limit=20):
         SELECT * FROM emails
         WHERE subject LIKE ? OR body LIKE ? OR sender LIKE ? OR recipient LIKE ?
         ORDER BY received_at DESC
-        LIMIT ?
-    """, (like, like, like, like, limit))
+        LIMIT ? OFFSET ?
+    """, (like, like, like, like, limit, offset))
     return cur.fetchall()
+
+
+def count_emails(conn, query=""):
+    """Count total emails matching query (for pagination)."""
+    cur = conn.cursor()
+    like = f"%{query}%"
+    cur.execute("""
+        SELECT count(*) FROM emails
+        WHERE subject LIKE ? OR body LIKE ? OR sender LIKE ? OR recipient LIKE ?
+    """, (like, like, like, like))
+    return cur.fetchone()[0]
 
 
 def get_emails_for_contact(conn, contact_id, limit=10):
@@ -196,7 +218,7 @@ def upsert_calendar_event(conn, event_id, title, description, start_time, end_ti
     return cur.lastrowid
 
 
-def get_upcoming_events(conn, limit=10):
+def get_upcoming_events(conn, limit=10, offset=0):
     """Retrieve upcoming calendar events."""
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
@@ -204,9 +226,16 @@ def get_upcoming_events(conn, limit=10):
         SELECT * FROM calendar_events
         WHERE start_time >= ?
         ORDER BY start_time ASC
-        LIMIT ?
-    """, (now, limit))
+        LIMIT ? OFFSET ?
+    """, (now, limit, offset))
     return cur.fetchall()
+
+
+def count_events(conn):
+    """Count total calendar events."""
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM calendar_events")
+    return cur.fetchone()[0]
 
 
 # =====================================================================
@@ -255,7 +284,7 @@ def upsert_note(conn, filename, file_path, title, content, summary=None,
     return cur.lastrowid
 
 
-def search_notes(conn, query, limit=20):
+def search_notes(conn, query, limit=20, offset=0):
     """Search notes by title, content, or tags."""
     cur = conn.cursor()
     like = f"%{query}%"
@@ -263,9 +292,20 @@ def search_notes(conn, query, limit=20):
         SELECT * FROM notes
         WHERE title LIKE ? OR content LIKE ? OR tags LIKE ?
         ORDER BY updated_at DESC
-        LIMIT ?
-    """, (like, like, like, limit))
+        LIMIT ? OFFSET ?
+    """, (like, like, like, limit, offset))
     return cur.fetchall()
+
+
+def count_notes(conn, query=""):
+    """Count total notes matching query (for pagination)."""
+    cur = conn.cursor()
+    like = f"%{query}%"
+    cur.execute("""
+        SELECT count(*) FROM notes
+        WHERE title LIKE ? OR content LIKE ? OR tags LIKE ?
+    """, (like, like, like))
+    return cur.fetchone()[0]
 
 
 # =====================================================================
@@ -291,16 +331,27 @@ def insert_knowledge_entry(conn, entry_type, title, content,
     return entry_id
 
 
-def search_knowledge(conn, query, limit=20):
+def search_knowledge(conn, query, limit=20, offset=0):
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
         SELECT * FROM knowledge_entries
         WHERE title LIKE ? OR content LIKE ?
         ORDER BY created_at DESC
-        LIMIT ?
-    """, (like, like, limit))
+        LIMIT ? OFFSET ?
+    """, (like, like, limit, offset))
     return cur.fetchall()
+
+
+def count_knowledge(conn, query=""):
+    """Count total knowledge entries matching query (for pagination)."""
+    cur = conn.cursor()
+    like = f"%{query}%"
+    cur.execute("""
+        SELECT count(*) FROM knowledge_entries
+        WHERE title LIKE ? OR content LIKE ?
+    """, (like, like))
+    return cur.fetchone()[0]
 
 
 # =====================================================================
@@ -2111,3 +2162,74 @@ def _parse_frontmatter(content):
             frontmatter[key] = value
 
     return frontmatter, body
+
+
+# =====================================================================
+# Backup & Key Rotation
+# =====================================================================
+
+def backup_brain_db(backup_path=None):
+    """Buat backup brain.db ke file backup (SQLite VACUUM INTO).
+
+    Jika backup_path tidak ditentukan, menghasilkan nama file dengan
+    timestamp di folder root proyek.
+    """
+    from datetime import datetime
+    import shutil
+
+    if backup_path is None:
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_path = PROJECT_ROOT / f"brain_backup_{ts}.db"
+    else:
+        backup_path = Path(backup_path)
+
+    conn = get_connection()
+    try:
+        conn.execute(f"VACUUM INTO '{backup_path.as_posix()}'")
+    finally:
+        conn.close()
+
+    return str(backup_path)
+
+
+def rotate_db_key(old_key_b64, new_key_b64):
+    """Rotasi kunci enkripsi SQLCipher dari kunci lama ke kunci baru.
+
+    Args:
+        old_key_b64: Kunci lama (base64 of 32 bytes)
+        new_key_b64: Kunci baru (base64 of 32 bytes)
+
+    Returns:
+        str: Path ke database baru yang telah di-rekey
+    """
+    import base64
+    from datetime import datetime
+
+    old_key_hex = base64.urlsafe_b64decode(old_key_b64).hex()
+    new_key_hex = base64.urlsafe_b64decode(new_key_b64).hex()
+
+    new_db = PROJECT_ROOT / f"brain.db.rotated.{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(f'PRAGMA key = "x\'{old_key_hex}\'"')
+    conn.execute(f"ATTACH DATABASE '{new_db.as_posix()}' AS encrypted KEY \"x'{new_key_hex}'\"")
+    conn.execute("SELECT sqlcipher_export('encrypted')")
+    conn.execute("DETACH DATABASE encrypted")
+    conn.close()
+
+    return str(new_db)
+
+
+def get_db_stats(conn):
+    """Dapatkan statistik database untuk health endpoint."""
+    cur = conn.cursor()
+    stats = {}
+    for table in ("contacts", "notes", "emails", "calendar_events",
+                  "knowledge_entries", "entities", "entity_relations",
+                  "conversations", "embeddings", "users"):
+        try:
+            cur.execute(f"SELECT count(*) FROM {table}")
+            stats[table] = cur.fetchone()[0]
+        except Exception:
+            stats[table] = 0
+    return stats
