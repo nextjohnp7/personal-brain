@@ -4,10 +4,7 @@ from cryptography.fernet import Fernet
 
 @pytest.fixture(params=[
     "plain",
-    pytest.param("encrypted", marks=pytest.mark.xfail(
-        reason="Fernet whole-file architecture: second close() overwrites the "
-               "first connection's writes. Remove xfail after SQLCipher migration.",
-        strict=False)),
+    "encrypted",
 ])
 def db_mode(request, monkeypatch, tmp_path):
     if request.param == "encrypted":

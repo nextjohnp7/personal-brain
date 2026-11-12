@@ -4,14 +4,13 @@ All data is stored in a single SQLite file on the user's computer.
 No server is required.
 """
 
-import sqlite3
+import base64
 import json
 import os
-import tempfile
 from pathlib import Path
 from datetime import datetime
 
-from brain_encryption import get_connection as _get_secure_connection, migrate_plaintext_to_encrypted
+import sqlcipher3 as sqlite3
 from brain_embeddings import embed_text, cosine_similarity as _cosine_similarity
 
 # Database location at project root
@@ -20,112 +19,39 @@ DB_PATH = PROJECT_ROOT / "brain.db"
 ENCRYPTED_PATH = PROJECT_ROOT / "brain.db.enc"
 
 
-def _get_fernet():
-    """Return a Fernet cipher if BRAIN_DB_KEY is set, else None."""
+def _get_key_hex():
+    """Reuse BRAIN_DB_KEY (Fernet key = base64 of 32 bytes) as SQLCipher raw key."""
     key_b64 = os.environ.get("BRAIN_DB_KEY")
     if not key_b64:
         return None
-    from cryptography.fernet import Fernet
-    return Fernet(key_b64.encode())
-
-
-# Registry of encrypted connections for cleanup on close.
-# sqlite3.Connection objects don't allow custom attributes or method overrides,
-# so we use a wrapper class that proxies to the real connection.
-_secure_conns = {}
-
-
-class _SecureConnection:
-    """Wrapper around sqlite3.Connection that re-encrypts the DB on close."""
-
-    def __init__(self, conn, tmp_path, fernet, enc_path):
-        self._conn = conn
-        self._tmp_path = tmp_path
-        self._fernet = fernet
-        self._enc_path = enc_path
-        self._closed = False
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        self._conn.close()
-        _encrypt_file(self._fernet, self._tmp_path, self._enc_path)
-        try:
-            os.unlink(self._tmp_path)
-        except OSError:
-            pass
-
-
-def _encrypt_file(fernet, src_path, dst_path):
-    """Encrypt src_path and write to dst_path."""
-    with open(src_path, "rb") as f:
-        data = f.read()
-    encrypted = fernet.encrypt(data)
-    with open(dst_path, "wb") as f:
-        f.write(encrypted)
-
-
-def _decrypt_file(fernet, src_path, dst_path):
-    """Decrypt src_path and write to dst_path."""
-    with open(src_path, "rb") as f:
-        encrypted = f.read()
-    data = fernet.decrypt(encrypted)
-    with open(dst_path, "wb") as f:
-        f.write(data)
+    raw = base64.urlsafe_b64decode(key_b64)
+    if len(raw) != 32:
+        raise ValueError("BRAIN_DB_KEY must be base64 of 32 bytes (Fernet key).")
+    return raw.hex()
 
 
 def get_connection():
     """Open a connection to the SQLite database. Create tables if they do not exist.
 
-    If BRAIN_DB_KEY is set, the database file is encrypted at rest using Fernet
-    (AES-128 in CBC mode with HMAC). The encrypted file is brain.db.enc; a
-    temporary decrypted copy is used while the connection is open and re-encrypted
-    on close.
+    If BRAIN_DB_KEY is set, the database is encrypted at rest using SQLCipher
+    (AES-256 per-page encryption). No temp plaintext file is ever written.
     """
-    fernet = _get_fernet()
-
-    if fernet is None:
-        # Plain SQLite (no encryption)
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        _create_tables(conn)
-        _create_access_control_tables(conn)
-        return conn
-
-    # Encrypted mode: decrypt to temp file, open SQLite, re-encrypt on close
-    if ENCRYPTED_PATH.exists():
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db")
-        with os.fdopen(tmp_fd, "wb") as f:
-            f.write(b"")  # placeholder
-        _decrypt_file(fernet, ENCRYPTED_PATH, tmp_path)
-    else:
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db")
-        with os.fdopen(tmp_fd, "wb") as f:
-            f.write(b"")
-
-    conn = sqlite3.connect(tmp_path)
+    key_hex = _get_key_hex()
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
 
-    # Check if this is a brand-new empty database
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
-    if not cur.fetchone():
-        _create_tables(conn)
-        _create_access_control_tables(conn)
+    if key_hex:
+        conn.execute(f'PRAGMA key = "x\'{key_hex}\'"')  # hex only, no injection risk
 
-    # Register cleanup metadata and wrap connection
-    secure_conn = _SecureConnection(conn, tmp_path, fernet, ENCRYPTED_PATH)
-    _secure_conns[secure_conn] = {
-        "tmp_path": tmp_path,
-        "fernet": fernet,
-        "enc_path": ENCRYPTED_PATH,
-        "closed": False,
-    }
-    return secure_conn
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")   # wait for locks instead of erroring
+    conn.execute("PRAGMA journal_mode = WAL")    # concurrent readers + one writer
+    # Fail fast on wrong key
+    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+
+    _create_tables(conn)
+    _create_access_control_tables(conn)
+    return conn
 
 
 
