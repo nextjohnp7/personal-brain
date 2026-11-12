@@ -1,34 +1,30 @@
-# PR Details — Prioritas 2: Migrasi plaintext cleanup (Critical)
+# PR Details — Prioritas 3: Stable embedding hashing (High)
 
 ## Commit
-`[pending]` — `fix(prioritas2): Migrasi plaintext cleanup`
+`[pending]` — `fix(prioritas3): Stable embedding hashing`
 
 ## Ringkasan Perubahan
-- `src/brain_db.py`:
-  * `DB_PATH` diubah dari `"brain.db"` ke `"brain.db.enc"` — aplikasi
-    sekarang membuka database terenkripsi dengan ekstensi `.enc`
-  * `ENCRYPTED_PATH` tetap menunjuk ke `"brain.db.enc"` (tidak ada
-    duplikasi)
-- File fisik di disk:
-  * `brain.db` di-rename menjadi `brain.db.enc` (197 KB, SQLCipher
-    encrypted)
-  * Tidak ada plaintext `brain.db` yang tersisa di disk
-- `.gitignore`: sudah mencakup `brain.db`, `brain.db.enc`,
-  `brain.db-wal`, `brain.db-shm`, `brain.db.enc.bak` (tidak perlu
-  perubahan)
+- `src/brain_embeddings.py`: Sudah menggunakan `hashlib.md5` via
+  `_stable_hash()` (tidak ada `hash()` built-in di kode) —
+  verifikasi konfirmasi tidak ada penggunaan `hash()` di src/
+- `tests/test_security.py`:
+  * `test_stable_hash_deterministic` — _stable_hash menghasilkan nilai
+    yang sama untuk input yang sama, dalam range [0, dim)
+  * `test_tfidf_embed_deterministic` — _tfidf_embed menghasilkan vektor
+    yang sama untuk teks yang sama, vektor nol untuk teks kosong
 
 ## Files Diubah
 | File | Perubahan |
 |------|-----------|
-| `src/brain_db.py` | DB_PATH → brain.db.enc |
+| `tests/test_security.py` | 2 tes stable embedding hashing |
 
 ## Test Result
-82/82 test lulus (lokal)
+84/84 test lulus (lokal)
 
 ## Verifikasi
-- `brain.db` plaintext: TIDAK ADA di disk ✓
-- `brain.db.enc`: TERSEDIA di disk ✓
-- `.gitignore`: mencakup kedua file ✓
+- Tidak ada `hash()` built-in di `src/` ✓
+- `_stable_hash` menggunakan `hashlib.md5(token).digest()[:4]` ✓
+- Vektor deterministik across repeated calls ✓
 
 ## Status
-Prioritas 2 — Migrasi plaintext cleanup SELESAI. Siap untuk review dan merge ke `main`.
+Prioritas 3 — Stable embedding hashing SELESAI. Siap untuk review dan merge ke `main`.

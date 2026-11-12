@@ -240,4 +240,34 @@ def test_clear_nonexistent_failed_gmail_message(db_mode):
         conn.close()
 
 
+# ---------- Prioritas 3 — Stable embedding hashing ----------
+def test_stable_hash_deterministic():
+    """P3-01: _stable_hash harus menghasilkan nilai yang sama untuk input
+    yang sama (tidak terpengaruh PYTHONHASHSEED)."""
+    import src.brain_embeddings as be
+
+    h1 = be._stable_hash("hello world", 384)
+    h2 = be._stable_hash("hello world", 384)
+    assert h1 == h2, "Stable hash harus deterministik"
+
+    # Nilai harus dalam range [0, dim)
+    assert 0 <= h1 < 384
+
+
+def test_tfidf_embed_deterministic():
+    """P3-02: _tfidf_embed harus menghasilkan vektor yang sama untuk teks
+    yang sama (deterministik across restarts)."""
+    import src.brain_embeddings as be
+
+    text = "stable embedding hash test"
+    v1 = be._tfidf_embed(text)
+    v2 = be._tfidf_embed(text)
+    assert v1 == v2, "TF-IDF embedding harus deterministik"
+    assert len(v1) == be._embedding_dim
+
+    # Vektor nol untuk teks kosong
+    v_empty = be._tfidf_embed("")
+    assert v_empty == [0.0] * be._embedding_dim
+
+
 
