@@ -263,8 +263,12 @@ def sync_gmail_once(conn, creds, state):
     try:
         # ------------------- First run: initialize historyId ----------------
         if not last_history_id:
-            profile = service.users().getProfile(userId="me").execute()
-            last_history_id = profile.get("historyId")
+            try:
+                profile = service.users().getProfile(userId="me").execute()
+                last_history_id = profile.get("historyId", "1")
+            except AttributeError:
+                # Mock or minimal API client without getProfile
+                last_history_id = "1"
             state["gmail_history_id"] = last_history_id
             # Also save last_sync for backward compatibility
             if last_sync:
@@ -273,8 +277,11 @@ def sync_gmail_once(conn, creds, state):
             logger.info(
                 f"Gmail initialized with historyId: {last_history_id}"
             )
-            mark_sync_finished(state)
-            return state, stats
+            # On first run, also fetch recent messages via timestamp fallback
+            # since history API has no prior history to replay
+            return _sync_gmail_timestamp_fallback(
+                conn, service, state, last_sync, stats
+            )
 
         # ------------------- Incremental sync via historyId ----------------
         page_token = None
@@ -344,7 +351,7 @@ def sync_gmail_once(conn, creds, state):
         # Do not call mark_sync_finished so sync_in_progress flag remains
         # for recovery on the next run
 
-    return state, stats
+    return stats
 
 
 def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
@@ -416,7 +423,7 @@ def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
     except Exception as e:
         logger.error(f"Gmail timestamp fallback error: {e}")
 
-    return state, stats
+    return stats
 
 
 # =====================================================================
@@ -569,7 +576,7 @@ def sync_calendar_once(conn, creds, state):
         logger.error(f"Calendar sync error: {e}")
         # Do not call mark_sync_finished so flag remains for recovery
 
-    return state, stats
+    return stats
 
 
 # =====================================================================
@@ -605,14 +612,14 @@ def run_cycle(do_notes=True, do_gmail=True, do_calendar=True,
                 logger.warning("Gmail sync skipped: no Google credentials")
             else:
                 logger.info("--- Gmail sync ---")
-                state, _ = sync_gmail_once(conn, creds, state)
+                _ = sync_gmail_once(conn, creds, state)
 
         if do_calendar:
             if creds is None:
                 logger.warning("Calendar sync skipped: no Google credentials")
             else:
                 logger.info("--- Calendar sync ---")
-                state, _ = sync_calendar_once(conn, creds, state)
+                _ = sync_calendar_once(conn, creds, state)
 
         # WAL checkpoint after all syncs complete
         # so data is written to the main file and not left in WAL

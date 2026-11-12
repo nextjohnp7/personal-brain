@@ -43,6 +43,34 @@ class FakeMessagesList:
         return page
 
 
+class FakeProfileGet:
+    def __init__(self, data):
+        self._data = data
+
+    def execute(self):
+        return self._data
+
+
+class FakeHistoryList:
+    def __init__(self, pages):
+        self._pages = pages
+        self._index = 0
+
+    def execute(self):
+        page = self._pages[self._index]
+        self._index += 1
+        return page
+
+
+class FakeHistoryResource:
+    def __init__(self, users):
+        self._users = users
+
+    def list(self, **kwargs):
+        self._users._messages_calls += 1
+        return FakeHistoryList([{"history": [], "nextPageToken": None}])
+
+
 class FakeUsers:
     def __init__(self, messages_pages, events_pages=None, http_error_410=False):
         self._messages_pages = messages_pages
@@ -52,12 +80,24 @@ class FakeUsers:
         self._messages_calls = 0
         self._events_calls = 0
         self._captured_q = None
+        self._messages_resource = None
+        self._events_resource = None
 
     def messages(self):
-        return FakeMessagesResource(self)
+        if self._messages_resource is None:
+            self._messages_resource = FakeMessagesResource(self)
+        return self._messages_resource
 
     def events(self):
-        return FakeEventsResource(self)
+        if self._events_resource is None:
+            self._events_resource = FakeEventsResource(self)
+        return self._events_resource
+
+    def history(self):
+        return FakeHistoryResource(self)
+
+    def getProfile(self, **kwargs):
+        return FakeProfileGet({"historyId": "1"})
 
     @property
     def captured_q(self):
@@ -67,11 +107,14 @@ class FakeUsers:
 class FakeMessagesResource:
     def __init__(self, users):
         self._users = users
+        self._list = None
 
     def list(self, **kwargs):
         self._users._messages_calls += 1
         self._users._captured_q = kwargs.get("q", "")
-        return FakeMessagesList(self._users._messages_pages)
+        if self._list is None:
+            self._list = FakeMessagesList(self._users._messages_pages)
+        return self._list
 
     def get(self, **kwargs):
         msg_id = kwargs.get("id", "unknown")
@@ -102,7 +145,7 @@ class FakeEventsList:
         if self._http_error_410 and not self._retried:
             self._retried = True
             from googleapiclient.errors import HttpError
-            resp = type("Response", (), {"status": 410})()
+            resp = type("Response", (), {"status": 410, "reason": "syncToken invalid"})()
             raise HttpError(resp, b'{"error": {"code": 410, "message": "syncToken invalid"}}')
         page = self._pages[self._index]
         self._index += 1
@@ -112,36 +155,46 @@ class FakeEventsList:
 class FakeEventsResource:
     def __init__(self, users):
         self._users = users
+        self._list = None
 
     def list(self, **kwargs):
         self._users._events_calls += 1
-        return FakeEventsList(self._users._events_pages, self._users._http_error_410)
+        if self._list is None:
+            self._list = FakeEventsList(self._users._events_pages, self._users._http_error_410)
+        return self._list
 
 
 class FakeService:
     def __init__(self, messages_pages, events_pages=None, http_error_410=False):
         self._users = FakeUsers(messages_pages, events_pages, http_error_410)
+        self._events_resource = None
 
     def users(self):
         return self._users
 
     def events(self):
-        return self._users
+        if self._events_resource is None:
+            self._events_resource = FakeEventsResource(self._users)
+        return self._events_resource
 
 
 def fake_build(api_name, version, credentials=None, **kwargs):
     """Fake googleapiclient.discovery.build. Routes by api_name."""
     if api_name == "gmail":
-        return FakeService(
+        service = FakeService(
             getattr(fake_build, "_gmail_pages", []),
             http_error_410=getattr(fake_build, "_gmail_410", False),
         )
+        fake_build._last_service = service
+        return service
     elif api_name == "calendar":
-        return FakeService(
+        service = FakeService(
             [],
             getattr(fake_build, "_calendar_pages", []),
             http_error_410=getattr(fake_build, "_calendar_410", False),
         )
+        fake_build._last_service = service
+        return service
     raise ValueError(f"Unknown API: {api_name}")
 
 
@@ -221,7 +274,7 @@ def test_gmail_sync_date_query(db_mode, monkeypatch):
     finally:
         conn.close()
 
-    assert fake_build._users.captured_q.startswith("after:")
+    assert fake_build._last_service._users.captured_q.startswith("after:")
 
 
 # ---------- Calendar sync with mock ----------
@@ -248,7 +301,7 @@ def test_calendar_sync_410_recovery(db_mode, monkeypatch):
         conn.close()
 
     assert state.get("calendar_sync_token") is None
-    assert fake_build._users._events_calls == 2
+    assert fake_build._last_service._users._events_calls == 2
 
 
 def test_calendar_sync_pagination(db_mode, monkeypatch):
@@ -270,7 +323,7 @@ def test_calendar_sync_pagination(db_mode, monkeypatch):
             ],
             "nextPageToken": "page2",
         },
-        {"items": []},
+        {"items": [], "nextSyncToken": "sync_token_after_resync"},
     ]
     fake_build._calendar_pages = pages
     fake_build._calendar_410 = False
