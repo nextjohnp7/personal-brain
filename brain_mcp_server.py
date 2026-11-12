@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 try:
     from mcp.server.fastmcp import FastMCP
-    from mcp.types import TextContent
 except ImportError:
     logger.error("MCP package not installed. Run: pip install mcp")
     sys.exit(1)
@@ -48,7 +47,9 @@ from brain_db import (
     upsert_contact,
     upsert_entity,
     add_entity_relation,
-    log_conversation,
+    get_emails_for_contact,
+    get_entity_relations,
+    search_entities,
 )
 
 mcp = FastMCP("Personal Brain")
@@ -231,16 +232,12 @@ def brain_contact_context(name: str, api_key: str = "") -> str:
         if c.get('last_interaction'):
             lines.append(f"- Last interaction: {c['last_interaction']}")
 
-        # Emails
-        from brain_db import get_emails_for_contact
         emails = [dict(r) for r in get_emails_for_contact(conn, cid, limit=5)]
         if emails:
             lines.append("\n## Recent Emails")
             for e in emails:
                 lines.append(f"- {e.get('sender', '')} → {e.get('subject', '(no subject)')} ({e.get('received_at', '')})")
 
-        # Knowledge graph relations
-        from brain_db import upsert_entity, get_entity_relations, search_entities
         entities = search_entities(conn, c['name'], limit=1)
         if entities:
             eid = entities[0]['id']
@@ -401,7 +398,7 @@ def get_tailscale_ip():
     try:
         result = subprocess.run(
             ["tailscale", "ip", "-4"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5, check=False
         )
         if result.returncode == 0:
             ip = result.stdout.strip()

@@ -1,4 +1,2 @@
-# Optional: real embeddings (all-MiniLM-L6-v2, ~80 MB model, downloads on first use).
-# Without this, brain falls back to a lightweight TF-IDF-style embedding automatically.
-torch>=2.1
-transformers>=4.35
+-e '.[embeddings]'
+
