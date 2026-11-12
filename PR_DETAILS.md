@@ -1,21 +1,23 @@
-# PR Details — F-05 SQL Table Name Allowlist Validation
+# PR Details — F-07 Assertion Tests per F-ID
 
 ## Commit
-`20e03ed` — `fix(security): F-05 SQL table name allowlist validation - defense-in-depth`
+`7eefe4d` — `fix(security): F-07 Assertion tests per F-ID`
 
 ## Ringkasan Perubahan
-- `src/brain_db.py`:
-  * Tambah `_TABLE_NAME_RE` (`^[a-zA-Z_][a-zA-Z0-9_]*$`) dan `_validate_table_name()`
-  * Terapkan ke 4 lokasi f-string SQL: `export_brain_json`, `get_shared_items`, `check_item_access`, `get_db_stats`
-  * Mencegah SQL injection jika nama tabel berubah dari input user di masa depan
+- `tests/test_security.py`:
+  * `test_brain_db_key_required`: F-01 — `get_connection()` gagal jika `BRAIN_DB_KEY`
+    tidak di-set (fail-closed enkripsi)
+  * `test_validate_table_name_rejects_malicious`: F-05 — `_validate_table_name()`
+    tolak nama tabel berbahaya (SQL injection), terima nama valid
 
 ## Files Diubah
 | File | Perubahan |
 |------|-----------|
-| `src/brain_db.py` | Table name allowlist validation for all f-string SQL |
+| `tests/test_security.py` | Assertion tests untuk F-01 dan F-05 |
 
 ## Test Result
-73/73 test lulus (lokal)
+76/76 test lulus (lokal)
 
 ## Status
+Prioritas 3 — Security SELESAI (F-01 sampai F-07). Semua 76 test lulus.
 Siap untuk review dan merge ke `main`.
