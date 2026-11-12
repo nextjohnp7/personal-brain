@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personal-brain"
+version = "1.0.0"
+description = "A local-first knowledge base (second brain) for AI agents — encrypted SQLite, MCP server, web dashboard, sync daemon"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "John (nextjohnp7)"}]
+license = {text = "MIT"}
+keywords = ["mcp", "second-brain", "knowledge-base", "sqlcipher", "obsidian", "flask", "local-first", "ai-agents", "python", "sqlite"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Database",
+    "Topic :: Office/Business",
+]
+
+[project.scripts]
+manage-brain = "manage_brain:main"
+brain-dashboard = "brain_web_dashboard:main"
+brain-mcp = "brain_mcp_server:main"
+brain-sync-daemon = "brain_sync_daemon:main"
+brain-voice = "brain_voice:main"
+
+[project.optional-dependencies]
+embeddings = [
+    "torch>=2.1",
+    "transformers>=4.35",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "mypy>=1.11",
+    "coverage>=7.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "."]
+select = ["E", "F", "I", "W", "B", "C4", "UP", "PL", "S"]
+ignore = ["E501", "B008"]
+unfixable = ["I"]
+
+[tool.ruff.isort]
+known-first-party = ["brain_db", "brain_connectors", "brain_embeddings", "brain_integration"]
+force-single-line = true
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_ignores = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "*/tests/*",
+    "*/migrate_to_sqlcipher.py",
+]
