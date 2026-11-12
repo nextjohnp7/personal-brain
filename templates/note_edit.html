@@ -5,6 +5,7 @@
 {% block content %}
 <h2>Edit Note: {{ note.title or '(no title)' }}</h2>
 <form method="POST">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-group">
         <label>Filename</label>
         <input type="text" name="filename" value="{{ note.filename }}">

@@ -28,6 +28,10 @@ from flask import (
     url_for, jsonify, session, flash,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
+from urllib.parse import urlparse, urljoin
+from flask_wtf.csrf import CSRFProtect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from brain_db import (
     get_connection,
@@ -68,6 +72,22 @@ if not _secret:
     _secret = secrets.token_hex(32)
     logger.warning("BRAIN_DASHBOARD_SECRET not set — using random generated key (sessions invalid on restart)")
 app.secret_key = _secret
+
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    WTF_CSRF_TIME_LIMIT=3600,
+)
+csrf = CSRFProtect(app)
+limiter = Limiter(key_func=get_remote_address, app=app,
+                  default_limits=[], storage_uri="memory://")
+
+def _is_safe_url(target):
+    if not target:
+        return False
+    ref = urlparse(request.host_url)
+    test = urlparse(urljoin(request.host_url, target))
+    return test.scheme in ("http", "https") and test.netloc == ref.netloc
 
 # Simple API key protection for sharing
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
@@ -114,6 +134,7 @@ def get_conn():
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute", methods=["POST"])
 def login():
     if not AUTH_ENABLED:
         return redirect(url_for("index"))
@@ -124,7 +145,9 @@ def login():
             session["user_id"] = username
             session.permanent = True
             app.permanent_session_lifetime = timedelta(days=7)
-            next_url = request.args.get("next") or url_for("index")
+            next_url = request.args.get("next")
+            if not _is_safe_url(next_url):
+                next_url = url_for("index")
             return redirect(next_url)
         flash("Invalid username or password", "error")
     return render_template("login.html")

@@ -23,6 +23,8 @@ def dashboard(monkeypatch, tmp_path):
     monkeypatch.setattr(dash, "AUTH_ENABLED", False)
     monkeypatch.setattr(dash, "BRAIN_API_KEY", "")
     dash.app.config["TESTING"] = True
+    dash.app.config["WTF_CSRF_ENABLED"] = False
+    dash.app.config["RATELIMIT_ENABLED"] = False
     return dash
 
 
