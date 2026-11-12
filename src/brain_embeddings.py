@@ -62,10 +62,8 @@ def get_embedding_version() -> str:
 
 
 def _mean_pool_with_attention_mask(outputs, attention_mask):
-    """Mean pooling yang memperhitungkan attention mask (tidak include padding).
-
-    Sebaliknya mean pooling sederhana (mean(dim=1)) memberikan bobot sama
-    pada token padding, yang menurunkan kualitas embedding untuk teks pendek.
+    """Mean pooling that accounts for the attention mask (does not include
+    padding tokens, which would degrade embedding quality for short text).
     """
     import torch
 
@@ -135,11 +133,11 @@ def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
 
 
 def _stable_hash(token: str, dim: int) -> int:
-    """Stable hash untuk TF-IDF fallback (deterministik lintas restart).
+    """Stable hash for TF-IDF fallback (deterministic across restarts).
 
-    Python's built-in hash() di-randomisasi per restart (PYTHONHASHSEED),
-    sehingga tidak aman untuk embedding yang disimpan di database.
-    Menggunakan hashlib.md5 sebagai pengganti.
+    Python's built-in hash() is randomized per restart (PYTHONHASHSEED),
+    so it is not safe for embeddings stored in the database.
+    Uses hashlib.md5 as a replacement.
     """
     return int.from_bytes(hashlib.md5(token.encode("utf-8")).digest()[:4], "little") % dim
 

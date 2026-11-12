@@ -71,8 +71,8 @@ def load_state():
 
 
 def save_state(state):
-    """Simpan state secara atomic (temp file + os.replace) agar tidak
-    rusak jika proses crash saat menulis."""
+    """Save state atomically (temp file + os.replace) so it is not
+    corrupted if the process crashes while writing."""
     tmp_path = STATE_FILE.with_suffix(".json.tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
@@ -80,26 +80,26 @@ def save_state(state):
 
 
 def mark_sync_started(state, source):
-    """Tandai bahwa sync untuk source sedang berjalan (untuk recovery)."""
+    """Mark that sync for the given source is running (for recovery)."""
     state["sync_in_progress"] = source
     state["sync_started_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
 
 
 def mark_sync_finished(state):
-    """Hapus tanda sync-in-progress setelah selesai."""
+    """Clear the sync-in-progress flag after completion."""
     state.pop("sync_in_progress", None)
     state.pop("sync_started_at", None)
     save_state(state)
 
 
 def recover_interrupted_sync(state):
-    """Jika state menunjukkan sync sebelumnya terputus, reset flag dan
-    kembalikan True agar caller tahu untuk memperlakukan dengan hati-hati."""
+    """If state indicates a previous sync was interrupted, reset the flag
+    and return True so the caller knows to handle it carefully."""
     if state.get("sync_in_progress"):
         logger.warning(
-            f"Sync sebelumnya terputih untuk {state['sync_in_progress']} "
-            f"pada {state.get('sync_started_at')}. Flag di-reset."
+            f"Previous sync for {state['sync_in_progress']} was interrupted "
+            f"at {state.get('sync_started_at')}. Flag reset."
         )
         state.pop("sync_in_progress", None)
         state.pop("sync_started_at", None)
@@ -203,7 +203,7 @@ def sync_notes_once(conn, folder, state):
 # =====================================================================
 
 def _process_gmail_message(conn, service, msg_data, stats):
-    """Proses satu pesan Gmail: upsert contact + insert email."""
+    """Process one Gmail message: upsert contact + insert email."""
     headers = {
         h["name"]: h["value"]
         for h in msg_data.get("payload", {}).get("headers", [])
@@ -216,7 +216,7 @@ def _process_gmail_message(conn, service, msg_data, stats):
     snippet = msg_data.get("snippet", "")
     received_at = headers.get("Date", "")
 
-    # Extract email dari sender
+    # Extract email from sender
     sender_email = _extract_email(sender)
     sender_name = _extract_name(sender)
 
@@ -242,13 +242,13 @@ def _process_gmail_message(conn, service, msg_data, stats):
 
 
 def sync_gmail_once(conn, creds, state):
-    """Sync email baru dari Gmail sejak last sync.
+    """Sync new emails from Gmail since last sync.
 
-    Menggunakan Gmail API 'historyId' sebagai checkpoint (rekomendasi Google)
-    agar tidak melewatkan atau memproses ulang email saat proses terputus.
-    Jika historyId belum ada (first run), ambil historyId saat ini dari profil
-    dan simpan tanpa memproses email lama.
-    Jika historyId kadaluarsa (404), fallback ke query 'after:' timestamp.
+    Uses Gmail API 'historyId' as checkpoint (recommended by Google)
+    to avoid missing or reprocessing emails when the process is interrupted.
+    If historyId does not exist (first run), fetch current historyId from
+    profile and save without processing old emails.
+    If historyId has expired (404), fall back to 'after:' timestamp query.
     """
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
@@ -261,22 +261,22 @@ def sync_gmail_once(conn, creds, state):
 
     mark_sync_started(state, "gmail")
     try:
-        # ------------------- First run: inisialisasi historyId ----------------
+        # ------------------- First run: initialize historyId ----------------
         if not last_history_id:
             profile = service.users().getProfile(userId="me").execute()
             last_history_id = profile.get("historyId")
             state["gmail_history_id"] = last_history_id
-            # Simpan juga last_sync untuk kompatibilitas dengan kode lama
+            # Also save last_sync for backward compatibility
             if last_sync:
                 state["gmail_last_sync"] = last_sync
             save_state(state)
             logger.info(
-                f"Gmail diinisialisasi dengan historyId: {last_history_id}"
+                f"Gmail initialized with historyId: {last_history_id}"
             )
             mark_sync_finished(state)
             return state, stats
 
-        # ------------------- Incremental sync via historyId ------------------
+        # ------------------- Incremental sync via historyId ----------------
         page_token = None
         newest_history_id = last_history_id
 
@@ -293,9 +293,9 @@ def sync_gmail_once(conn, creds, state):
                 history = service.users().history().list(**kwargs).execute()
             except HttpError as e:
                 if e.resp.status == 404:
-                    # historyId kadaluarsa — fallback ke timestamp-based sync
+                    # historyId expired — fall back to timestamp-based sync
                     logger.warning(
-                        "Gmail historyId kadaluarsa, fallback ke timestamp-based sync"
+                        "Gmail historyId expired, falling back to timestamp-based sync"
                     )
                     return _sync_gmail_timestamp_fallback(
                         conn, service, state, last_sync, stats
@@ -307,17 +307,17 @@ def sync_gmail_once(conn, creds, state):
                 if hid:
                     newest_history_id = hid
 
-                # Pesan baru ditambahkan
+                # New messages added
                 for msg_added in record.get("messagesAdded", []):
                     msg = msg_added.get("message", {})
                     try:
                         _process_gmail_message(conn, service, msg, stats)
                     except Exception as e:
                         logger.error(
-                            f"Gagal memproses pesan Gmail {msg.get('id')}: {e}"
+                            f"Failed to process Gmail message {msg.get('id')}: {e}"
                         )
 
-                # Pesan dihapus
+                # Messages deleted
                 for msg_deleted in record.get("messagesDeleted", []):
                     msg_id = msg_deleted.get("message", {}).get("id")
                     if msg_id:
@@ -331,26 +331,26 @@ def sync_gmail_once(conn, creds, state):
             if not page_token:
                 break
 
-        # Simpan historyId terbaru
+        # Save latest historyId
         state["gmail_history_id"] = newest_history_id or last_history_id
         mark_sync_finished(state)
         logger.info(
-            f"Gmail sync selesai: {stats['new_messages']} baru, "
-            f"{stats['contacts']} kontak"
+            f"Gmail sync complete: {stats['new_messages']} new, "
+            f"{stats['contacts']} contact(s)"
         )
 
     except Exception as e:
         logger.error(f"Gmail sync error: {e}")
-        # Jangan mark_sync_finished agar flag sync_in_progress tetap tercatat
-        # untuk recovery di run berikutnya
+        # Do not call mark_sync_finished so sync_in_progress flag remains
+        # for recovery on the next run
 
     return state, stats
 
 
 def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
-    """Fallback Gmail sync menggunakan query 'after:' timestamp
-    (digunakan ketika historyId kadaluarsa)."""
-    # Build query: hanya pesan setelah last sync
+    """Fallback Gmail sync using 'after:' timestamp query
+    (used when historyId has expired)."""
+    # Build query: only messages after last sync
     if last_sync:
         try:
             dt = datetime.fromisoformat(last_sync)
@@ -396,7 +396,7 @@ def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
                                 pass
                 except Exception as e:
                     logger.error(
-                        f"Gagal memproses pesan Gmail {msg.get('id')}: {e}"
+                        f"Failed to process Gmail message {msg.get('id')}: {e}"
                     )
 
             page_token = result.get("nextPageToken")
@@ -410,7 +410,7 @@ def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
 
         mark_sync_finished(state)
         logger.info(
-            f"Gmail timestamp fallback selesai: {stats['new_messages']} baru"
+            f"Gmail timestamp fallback complete: {stats['new_messages']} new"
         )
 
     except Exception as e:
@@ -424,12 +424,12 @@ def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
 # =====================================================================
 
 def sync_calendar_once(conn, creds, state):
-    """Sinkronisasi event kalender dari Google Calendar.
+    """Synchronize calendar events from Google Calendar.
 
-    Menggunakan Calendar API syncToken untuk sinkronisasi incremental
-    (menangkap edit, hapus, dan event baru). Fallback ke updatedMin
-    pada first run. Menyimpan state setelah setiap halaman agar
-    syncToken tidak hilang jika proses terputus di tengah pagination.
+    Uses Calendar API syncToken for incremental sync
+    (catches edits, deletions, and new events). Falls back to updatedMin
+    on first run. Saves state after each page so syncToken is not lost
+    if the process is interrupted during pagination.
     """
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
@@ -449,11 +449,11 @@ def sync_calendar_once(conn, creds, state):
                 "singleEvents": True,
                 "pageToken": page_token,
             }
-            # orderBy tidak kompatibel dengan syncToken per dokumentasi Google
+            # orderBy is incompatible with syncToken per Google Calendar API docs
             if sync_token:
                 kwargs["syncToken"] = sync_token
             else:
-                # First run: sinkronisasi event yang diperbarui dalam 30 hari terakhir
+                # First run: sync events updated in last 30 days
                 kwargs["orderBy"] = "startTime"
                 kwargs["updatedMin"] = (
                     datetime.now(timezone.utc) - timedelta(days=30)
@@ -463,9 +463,9 @@ def sync_calendar_once(conn, creds, state):
                 events_result = service.events().list(**kwargs).execute()
             except HttpError as e:
                 if e.resp.status == 410 and sync_token:
-                    # syncToken kadaluarsa — hapus dan lakukan resync penuh
+                    # syncToken expired — clear and perform full resync
                     logger.warning(
-                        "Calendar syncToken kadaluarsa (410 GONE), hapus dan resync dari awal"
+                        "Calendar syncToken expired (410 GONE), clearing and resyncing from scratch"
                     )
                     state["calendar_sync_token"] = None
                     save_state(state)
@@ -481,7 +481,7 @@ def sync_calendar_once(conn, creds, state):
 
             for event in events:
                 try:
-                    # Tangani event yang dihapus (status == "cancelled")
+                    # Handle deleted events (status == "cancelled")
                     if event.get("status") == "cancelled":
                         event_id = event.get("id", "")
                         if event_id:
@@ -510,7 +510,7 @@ def sync_calendar_once(conn, creds, state):
                         if a.get("email")
                     ]
 
-                    # Hubungkan ke contact (organizer atau attendee pertama)
+                    # Link to contact (organizer or first attendee)
                     contact_id = None
                     organizer = event.get("organizer", {})
                     organizer_email = organizer.get("email", "")
@@ -539,7 +539,7 @@ def sync_calendar_once(conn, creds, state):
 
                 except Exception as e:
                     logger.error(
-                        f"Gagal memproses event kalender {event.get('id')}: {e}"
+                        f"Failed to process calendar event {event.get('id')}: {e}"
                     )
 
             # Pagination
@@ -547,12 +547,12 @@ def sync_calendar_once(conn, creds, state):
             if not page_token:
                 break
 
-            # Simpan state setelah setiap halaman agar jika crash di tengah
-            # pagination, event yang sudah diproses tidak hilang dan
-            # pagination dapat dilanjutkan dari halaman berikutnya
+            # Save state after each page so that if the process crashes
+            # mid-pagination, already-processed events are not lost and
+            # pagination can continue from the next page
             save_state(state)
 
-        # Simpan syncToken untuk sinkronisasi incremental berikutnya
+        # Save syncToken for next incremental sync
         next_sync_token = events_result.get("nextSyncToken")
         if next_sync_token:
             state["calendar_sync_token"] = next_sync_token
@@ -561,13 +561,13 @@ def sync_calendar_once(conn, creds, state):
 
         mark_sync_finished(state)
         logger.info(
-            f"Calendar sync selesai: {stats['new_events']} event baru, "
-            f"{stats['contacts']} kontak"
+            f"Calendar sync complete: {stats['new_events']} new event(s), "
+            f"{stats['contacts']} contact(s)"
         )
 
     except Exception as e:
         logger.error(f"Calendar sync error: {e}")
-        # Jangan mark_sync_finished agar flag tetap tercatat untuk recovery
+        # Do not call mark_sync_finished so flag remains for recovery
 
     return state, stats
 
@@ -585,7 +585,7 @@ def run_cycle(do_notes=True, do_gmail=True, do_calendar=True,
     if state is None:
         state = load_state()
 
-    # Recovery: jika sync sebelumnya terputus, reset flag
+    # Recovery: if previous sync was interrupted, reset flag
     recover_interrupted_sync(state)
 
     if notes_folder is None:
@@ -614,8 +614,8 @@ def run_cycle(do_notes=True, do_gmail=True, do_calendar=True,
                 logger.info("--- Calendar sync ---")
                 state, _ = sync_calendar_once(conn, creds, state)
 
-        # WAL checkpoint setelah semua sinkronisasi selesai
-        # agar data tertulis ke file utama dan tidak tertunda di WAL
+        # WAL checkpoint after all syncs complete
+        # so data is written to the main file and not left in WAL
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.commit()
 

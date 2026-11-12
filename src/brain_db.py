@@ -88,7 +88,7 @@ def upsert_contact(conn, name, email=None, phone=None, company=None, role=None,
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, email, phone, company, role, source, context_notes, now))
         contact_id = cur.lastrowid
-        # Catat provenance untuk kontak baru
+        # Record provenance for new contact
         add_provenance(conn, 'contact', contact_id, source,
                        source_detail=f'created: {name}', confidence=1.0)
 
@@ -324,7 +324,7 @@ def insert_knowledge_entry(conn, entry_type, title, content,
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (entry_type, title, content, related_json, source, now, now))
     entry_id = cur.lastrowid
-    # Catat provenance untuk entri pengetahuan baru
+    # Record provenance for new knowledge entry
     add_provenance(conn, 'knowledge', entry_id, source or 'manual',
                    source_detail=f'created: {title}', confidence=1.0)
     conn.commit()
@@ -456,17 +456,17 @@ def semantic_search(conn, query, limit=10):
 
 
 def rebuild_embeddings(conn, source_type=None):
-    """Rebuild semua embedding dari scratch untuk source_type tertentu
-    (atau semua jika source_type=None).
+    """Rebuild all embeddings from scratch for a given source_type
+    (or all if source_type is None).
 
-    Berguna saat model embedding berubah atau data embedded korem.
-    Hapus embedding lama lalu hitung ulang dari konten asli.
+    Useful when the embedding model changes or embedded data is corrupt.
+    Deletes old embeddings and recomputes from original content.
     """
     from brain_embeddings import get_embedding_version
 
     cur = conn.cursor()
 
-    # Kumpulkan semua content_chunk yang perlu di-re-embed
+    # Collect all content chunks that need re-embedding
     if source_type:
         cur.execute(
             "SELECT id, source_type, source_id, content_chunk FROM embeddings WHERE source_type = ?",
@@ -498,7 +498,7 @@ def rebuild_embeddings(conn, source_type=None):
 
 
 def get_embedding_version_db(conn):
-    """Ambil model_version yang digunakan untuk embedding di database."""
+    """Get the model_version used for embeddings in the database."""
     cur = conn.cursor()
     try:
         cur.execute(
@@ -511,8 +511,8 @@ def get_embedding_version_db(conn):
 
 
 def embedding_version_mismatch(conn):
-    """Periksa apakah ada embedding dengan model_version yang berbeda
-    dari model yang sedang aktif. Mengembalikan (bool, active_version, db_version)."""
+    """Check if any embedding has a model_version different from
+    the currently active model. Returns (bool, active_version, db_version)."""
     from brain_embeddings import get_embedding_version
 
     active = get_embedding_version()
@@ -584,7 +584,7 @@ def add_entity_relation(conn, source_entity_id, target_entity_id, relation_type,
         VALUES (?, ?, ?, ?, ?)
     """, (source_entity_id, target_entity_id, relation_type, source, confidence))
     relation_id = cur.lastrowid
-    # Catat provenance untuk relasi baru
+    # Record provenance for new entity relation
     add_provenance(conn, 'entity_relation', relation_id, source,
                    source_detail=f'{relation_type}: {source_entity_id} -> {target_entity_id}',
                    confidence=confidence)
@@ -680,7 +680,7 @@ def query_knowledge_graph(conn, query, limit=10):
 
 
 # =====================================================================
-# Edit / Delete Operations (Koreksi dan Penarikan Fakta)
+# Edit / Delete Operations (Correction and Retraction of Facts)
 # =====================================================================
 
 def update_contact(conn, contact_id, name=None, email=None, phone=None,
@@ -1043,7 +1043,7 @@ def _create_tables(conn):
             role TEXT,
             source TEXT,           -- 'gmail', 'calendar', 'twitter', 'manual'
             last_interaction TEXT, -- ISO timestamp
-            context_notes TEXT,    -- catatan bebas tentang orang ini
+            context_notes TEXT,    -- free-form notes about this person
             status TEXT DEFAULT 'active',   -- active, corrected, retracted
             corrected_at TEXT,
             corrected_by TEXT,
@@ -1084,7 +1084,7 @@ def _create_tables(conn):
             end_time TEXT,
             location TEXT,
             attendees TEXT,        -- JSON array of emails
-            contact_id INTEGER,    -- FK to contacts (organizer atau primary attendee)
+            contact_id INTEGER,    -- FK to contacts (organizer or primary attendee)
             source TEXT DEFAULT 'google_calendar',
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now')),
@@ -1276,9 +1276,9 @@ def detect_prompt_injection(text):
 
 
 def label_item(conn, item_type, item_id, provenance_label=None, injection_risk=None):
-    """Simpan label provenance dan risiko injection pada item.
+    """Save provenance label and injection risk on an item.
 
-    item_type: 'contact' atau 'note'
+    item_type: 'contact' or 'note'
     """
     table = "contacts" if item_type == "contact" else "notes"
     cur = conn.cursor()
@@ -1293,7 +1293,7 @@ def label_item(conn, item_type, item_id, provenance_label=None, injection_risk=N
 # ---------- Owner-scoped queries ----------
 
 def get_contacts_by_owner(conn, user_id, limit=100):
-    """Daftar kontak milik user (owner_user_id = user_id)."""
+    """List contacts owned by user (owner_user_id = user_id)."""
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM contacts WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?",
@@ -1317,14 +1317,14 @@ def get_notes_by_owner(conn, user_id, limit=100):
 
 def add_provenance(conn, subject_type, subject_id, source_type,
                    source_detail=None, confidence=1.0):
-    """Catat sumber asal suatu fakta (provenance trail).
+    """Record the source of a fact (provenance trail).
 
     Args:
-        subject_type: 'contact', 'knowledge', atau 'entity_relation'
-        subject_id: ID baris di tabel subjek
+        subject_type: 'contact', 'knowledge', or 'entity_relation'
+        subject_id: row ID in the subject table
         source_type: 'gmail', 'calendar', 'twitter', 'conversation', 'manual'
-        source_detail: detail sumber (message_id, event_id, tweet_id, dll.)
-        confidence: skor kepercayaan 0.0-1.0
+        source_detail: source detail (message_id, event_id, tweet_id, etc.)
+        confidence: confidence score 0.0-1.0
     """
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
@@ -1339,8 +1339,8 @@ def add_provenance(conn, subject_type, subject_id, source_type,
     return cur.lastrowid
 
 
-def get_provenance(conn, subject_type, subject_id):
-    """Ambil semua entri provenance untuk subjek tertentu."""
+def get_provenance_for_subject(conn, subject_type, subject_id):
+    """Get all provenance entries for a given subject."""
     cur = conn.cursor()
     cur.execute("""
         SELECT * FROM provenance_entries
@@ -1354,8 +1354,8 @@ def get_provenance(conn, subject_type, subject_id):
 # Edit / Retraction Operations
 # =====================================================================
 
-def retract_contact(conn, contact_id, reason, retracted_by):
-    """Tarik kembali kontak (tandai sebagai retracted, tidak menghapus data)."""
+def retract_contact(conn, contact_id, reason=None, retracted_by=None):
+    """Retract a contact (mark as retracted, does not delete data)."""
     cur = conn.cursor()
     cur.execute("SELECT id, name, email FROM contacts WHERE id = ?", (contact_id,))
     row = cur.fetchone()
@@ -1372,7 +1372,7 @@ def retract_contact(conn, contact_id, reason, retracted_by):
             updated_at = ?
         WHERE id = ?
     """, (now, retracted_by, now, contact_id))
-    # Catat provenance penarikan
+    # Record provenance for retraction
     cur.execute("""
         INSERT INTO provenance_entries
         (subject_type, subject_id, source_type, source_detail,
@@ -1384,8 +1384,8 @@ def retract_contact(conn, contact_id, reason, retracted_by):
     return contact_id
 
 
-def retract_knowledge_entry(conn, entry_id, reason, retracted_by):
-    """Tarik kembali entri pengetahuan."""
+def retract_knowledge_entry(conn, entry_id, reason=None, retracted_by=None):
+    """Retract a knowledge entry."""
     cur = conn.cursor()
     cur.execute("SELECT id, content FROM knowledge_entries WHERE id = ?", (entry_id,))
     row = cur.fetchone()
@@ -1447,13 +1447,13 @@ def correct_knowledge_entry(conn, entry_id, new_content, corrected_by, reason):
 
 def consolidate_memory(conn, max_conversation_age_days=30,
                        similarity_threshold=0.85):
-    """Konsolidasi memori:
-    1. Deduplikasi kontak yang sama (berdasarkan email atau nama).
-    2. Ringkas percakapan lama (> max_conversation_age_days hari)
-       menjadi entri knowledge.
-    3. Tandai entri knowledge lama (> 90 hari) untuk tinjauan ulang.
+    """Consolidate memory:
+    1. Deduplicate contacts (by email or name).
+    2. Summarize old conversations (> max_conversation_age_days days)
+       into knowledge entries.
+    3. Flag old knowledge entries (> 90 days) for review.
 
-    Returns dict dengan statistik tindakan.
+    Returns dict with action statistics.
     """
     from datetime import datetime, timedelta
     stats = {
@@ -1465,7 +1465,7 @@ def consolidate_memory(conn, max_conversation_age_days=30,
     now = datetime.utcnow()
     cutoff = (now - timedelta(days=max_conversation_age_days)).isoformat()
 
-    # --- 1. Deduplikasi kontak berdasarkan email ---
+    # --- 1. Deduplicate contacts by email ---
     cur = conn.cursor()
     cur.execute("""
         SELECT id, name, email, created_at
@@ -1484,16 +1484,16 @@ def consolidate_memory(conn, max_conversation_age_days=30,
     for email, group in email_groups.items():
         if len(group) <= 1:
             continue
-        # Pertahankan yang paling baru, tarik kembali yang lama
+        # Keep newest, retract old
         group.sort(key=lambda r: r['created_at'] or '', reverse=True)
         keeper = group[0]
         for dup in group[1:]:
             retract_contact(conn, dup['id'],
-                            f"Duplikat email {email}, digabungkan ke ID {keeper['id']}",
+                            f"Duplicate email {email}, merged into ID {keeper['id']}",
                             "system_consolidation")
             stats["contacts_deduplicated"] += 1
 
-    # --- 2. Ringkas percakapan lama menjadi entri knowledge ---
+    # --- 2. Summarize old conversations into knowledge entries ---
     cur.execute("""
         SELECT id, user_message, agent_response, created_at
         FROM conversations
@@ -1502,8 +1502,8 @@ def consolidate_memory(conn, max_conversation_age_days=30,
     """, (cutoff,))
     old_convs = cur.fetchall()
     for conv in old_convs:
-        # Buat entri knowledge dari percakapan lama
-        title = f"Ringkasan percakapan: {conv['user_message'][:50]}"
+        # Create knowledge entry from old conversation
+        title = f"Conversation summary: {conv['user_message'][:50]}"
         content = f"User: {conv['user_message']}\nAgen: {conv['agent_response']}"
         insert_knowledge_entry(
             conn,
@@ -1514,7 +1514,7 @@ def consolidate_memory(conn, max_conversation_age_days=30,
         )
         stats["conversations_summarized"] += 1
 
-    # --- 3. Tandai entri knowledge lama (> 90 hari) untuk tinjauan ---
+    # --- 3. Flag old knowledge entries for review ---
     review_cutoff = (now - timedelta(days=90)).isoformat()
     cur.execute("""
         SELECT id FROM knowledge_entries
@@ -1522,7 +1522,7 @@ def consolidate_memory(conn, max_conversation_age_days=30,
     """, (review_cutoff,))
     old_knowledge = cur.fetchall()
     for k in old_knowledge:
-        # Tandai perlu ditinjau (hanya catatan provenance, status tetap active)
+        # Flag for review (provenance note only, status stays active)
         cur.execute("""
             INSERT INTO provenance_entries
             (subject_type, subject_id, source_type, source_detail,
@@ -1776,7 +1776,7 @@ def upsert_contact_with_owner(conn, name, email=None, phone=None, company=None, 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, email, phone, company, role, source, context_notes, now, owner_user_id))
         contact_id = cur.lastrowid
-        # Catat provenance untuk kontak baru
+        # Record provenance for new contact
         add_provenance(conn, 'contact', contact_id, source,
                        source_detail=f'created: {name}', confidence=1.0)
 
@@ -1825,7 +1825,7 @@ def upsert_note_with_owner(conn, filename, file_path, title, content, summary=No
 # =====================================================================
 
 def _sanitize_filename(name):
-    """Buat nama file yang aman dari nama entitas."""
+    """Create a safe filename from entity name."""
     import re
     safe = re.sub(r'[<>:"/\\|?*]', '_', name.strip())
     safe = re.sub(r'\s+', '_', safe)
@@ -1833,13 +1833,13 @@ def _sanitize_filename(name):
 
 
 def _add_backlinks(text, entity_names):
-    """Ganti nama entitas dalam teks dengan wiki-style backlinks [[Nama]].
+    """Replace entity names in text with wiki-style backlinks [[Name]].
 
-    Hanya mengganti jika nama belum ada dalam konteks link [[...]] atau ( ... ).
+    Only replaces if the name is not already within a [[...]] or ( ... ) context.
     """
     import re
 
-    # Urutkan nama berdasarkan panjang (terlama dulu) agar tidak partial match
+    # Sort names by length (longest first) to avoid partial match
     sorted_names = sorted(entity_names, key=len, reverse=True)
 
     for name in sorted_names:
@@ -1853,16 +1853,16 @@ def _add_backlinks(text, entity_names):
 
 
 def export_brain_markdown_with_backlinks(conn, output_folder):
-    """Export brain data sebagai file markdown terpisah dengan backlinks.
+    """Export brain data as separate markdown files with backlinks.
 
-    Setiap kontak, entri knowledge, note, dan entitas mendapat file .md sendiri
-    dengan frontmatter YAML. Referensi ke entitas lain dalam content diubah
-    menjadi [[Nama]] wiki-style links.
+    Each contact, knowledge entry, note, and entity gets its own .md file
+    with YAML frontmatter. References to other entities in content are
+    converted to [[Name]] wiki-style links.
 
-    Struktur output:
+    Output structure:
         output_folder/
-        ├── index.md              # Indeks semua entitas
-        ├── graph.md              # Visualisasi relasi knowledge graph
+        ├── index.md              # Index of all entities
+        ├── graph.md              # Visualize knowledge graph relations
         ├── contacts/
         │   ├── Alice Smith.md
         │   └── Bob Jones.md
@@ -1876,10 +1876,10 @@ def export_brain_markdown_with_backlinks(conn, output_folder):
 
     Args:
         conn: Database connection
-        output_folder: Folder tujuan export (akan dibuat jika belum ada)
+        output_folder: Destination folder for export (created if it does not exist)
 
     Returns:
-        dict dengan statistik export per kategori
+        dict with export statistics per category
     """
     from pathlib import Path
     import json
@@ -1905,7 +1905,7 @@ def export_brain_markdown_with_backlinks(conn, output_folder):
 
     cur = conn.cursor()
 
-    # --- Kontak ---
+    # --- Contacts ---
     contacts = [dict(r) for r in search_contacts(conn, "", limit=10000)]
     contact_names = [c['name'] for c in contacts if c.get('name')]
 
@@ -2120,17 +2120,17 @@ def export_brain_markdown_with_backlinks(conn, output_folder):
 
 
 def import_brain_markdown_with_backlinks(conn, input_folder):
-    """Import brain data dari folder markdown dengan backlinks.
+    """Import brain data from a folder of markdown files with backlinks.
 
-    Membaca file .md dari subfolder contacts/, knowledge/, notes/, entities/
-    dan mengimpornya ke database. Backlinks [[Nama]] dipertahankan sebagai teks.
+    Reads .md files from subfolders contacts/, knowledge/, notes/, entities/
+    and imports them into the database. Backlinks [[Name]] are preserved as text.
 
     Args:
         conn: Database connection
-        input_folder: Folder yang berisi file markdown export
+        input_folder: Folder containing markdown export files
 
     Returns:
-        dict dengan statistik import per kategori
+        dict with import statistics per category
     """
     from pathlib import Path
     import re
@@ -2220,7 +2220,7 @@ def import_brain_markdown_with_backlinks(conn, input_folder):
 
 
 def _parse_frontmatter(content):
-    """Parse YAML frontmatter dari markdown content.
+    """Parse YAML frontmatter from markdown content.
 
     Returns (frontmatter_dict, body_text).
     """
@@ -2249,10 +2249,10 @@ def _parse_frontmatter(content):
 # =====================================================================
 
 def backup_brain_db(backup_path=None):
-    """Buat backup brain.db ke file backup (SQLite VACUUM INTO).
+    """Create a backup of brain.db to a backup file (SQLite VACUUM INTO).
 
-    Jika backup_path tidak ditentukan, menghasilkan nama file dengan
-    timestamp di folder root proyek.
+    If backup_path is not specified, generates a filename with
+    timestamp in the project root folder.
     """
     from datetime import datetime
     import shutil
@@ -2273,14 +2273,14 @@ def backup_brain_db(backup_path=None):
 
 
 def rotate_db_key(old_key_b64, new_key_b64):
-    """Rotasi kunci enkripsi SQLCipher dari kunci lama ke kunci baru.
+    """Rotate SQLCipher encryption key from old key to new key.
 
     Args:
-        old_key_b64: Kunci lama (base64 of 32 bytes)
-        new_key_b64: Kunci baru (base64 of 32 bytes)
+        old_key_b64: Old key (base64 of 32 bytes)
+        new_key_b64: New key (base64 of 32 bytes)
 
     Returns:
-        str: Path ke database baru yang telah di-rekey
+        str: Path to the new rekeyed database
     """
     import base64
     from datetime import datetime
@@ -2301,7 +2301,7 @@ def rotate_db_key(old_key_b64, new_key_b64):
 
 
 def get_db_stats(conn):
-    """Dapatkan statistik database untuk health endpoint."""
+    """Get database statistics for health endpoint."""
     cur = conn.cursor()
     stats = {}
     for table in ("contacts", "notes", "emails", "calendar_events",

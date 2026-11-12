@@ -175,7 +175,7 @@ def logout():
 
 
 def get_current_user_id():
-    """Ambil user_id dari session (username saat AUTH_ENABLED)."""
+    """Get user_id from session (username when AUTH_ENABLED)."""
     return session.get("user_id")
 
 
@@ -256,7 +256,7 @@ def add_contact():
         conn = get_conn()
         try:
             user_id = get_current_user_id()
-            # Deteksi prompt-injection pada nama dan catatan
+            # Detect prompt-injection in name and notes
             combined = f"{name} {notes or ''}"
             is_inj, risk = detect_prompt_injection(combined)
             prov_label = "prompt-injection" if is_inj else "manual"
