@@ -1,22 +1,18 @@
-# PR Details — F-04: Export/Import Require BRAIN_API_KEY
+# PR Details — F-05 SQL Table Name Allowlist Validation
 
 ## Commit
-`c3999a6` — `fix(security): F-04 Export/Import require BRAIN_API_KEY - fail-closed`
+`20e03ed` — `fix(security): F-05 SQL table name allowlist validation - defense-in-depth`
 
 ## Ringkasan Perubahan
-- `brain_web_dashboard.py`:
-  * `BRAIN_API_KEY` wajib di-set; `raise ValueError` jika kosong (fail-closed)
-  * `require_api_key()` selalu enforce (tidak ada kondisi `if BRAIN_API_KEY`)
-  * `/export` dan `/import` selalu dilindungi API key
-- Tests: `conftest.py` set `BRAIN_API_KEY` env; `test_routes.py` sertakan
-  `X-API-Key` header untuk `/export` dan `/import`
+- `src/brain_db.py`:
+  * Tambah `_TABLE_NAME_RE` (`^[a-zA-Z_][a-zA-Z0-9_]*$`) dan `_validate_table_name()`
+  * Terapkan ke 4 lokasi f-string SQL: `export_brain_json`, `get_shared_items`, `check_item_access`, `get_db_stats`
+  * Mencegah SQL injection jika nama tabel berubah dari input user di masa depan
 
 ## Files Diubah
 | File | Perubahan |
 |------|-----------|
-| `brain_web_dashboard.py` | Fail-closed API key: always-on, no unset mode |
-| `tests/conftest.py` | Dashboard fixture sets BRAIN_API_KEY via env var |
-| `tests/test_routes.py` | API key header for /export and /import tests |
+| `src/brain_db.py` | Table name allowlist validation for all f-string SQL |
 
 ## Test Result
 73/73 test lulus (lokal)
