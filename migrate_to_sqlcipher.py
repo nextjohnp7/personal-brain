@@ -4,7 +4,7 @@ Reuses the same BRAIN_DB_KEY (Fernet key = base64 of 32 bytes) as the SQLCipher
 raw key. Keeps the old file as brain.db.enc.bak until you are confident.
 
 Prerequisites:
-    pip install sqlcipher3 cryptography
+    pip install sqlcipher3-binary cryptography
 
 Run:
     BRAIN_DB_KEY=<your-key> python migrate_to_sqlcipher.py

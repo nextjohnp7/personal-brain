@@ -64,7 +64,7 @@ def search_contacts_cmd(conn):
 
 def sync_notes(conn):
     print("\n=== SYNC NOTES ===")
-    folder = os.environ.get('BRAIN_NOTES_FOLDER', 'D:/Project GitHub Brain Memory/Notes')
+    folder = os.environ.get('BRAIN_NOTES_FOLDER', str(Path(__file__).parent / 'Notes'))
     try:
         stats = sync_markdown_notes(folder)
         print(f"Done. Notes synced: {stats['notes']}")
