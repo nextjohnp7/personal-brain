@@ -106,7 +106,7 @@ def _is_safe_url(target):
 # Simple API key protection for sharing
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
 
-# Web dashboard authentication
+# Web dashboard authentication (fail-closed: always required)
 DASHBOARD_USER = os.environ.get("BRAIN_DASHBOARD_USER", "")
 DASHBOARD_PASSWORD_HASH = os.environ.get("BRAIN_DASHBOARD_PASSWORD_HASH", "")
 # If BRAIN_DASHBOARD_PASSWORD is set (plaintext), hash it on first run
@@ -114,16 +114,22 @@ DASHBOARD_PASSWORD_PLAIN = os.environ.get("BRAIN_DASHBOARD_PASSWORD", "")
 if DASHBOARD_PASSWORD_PLAIN and not DASHBOARD_PASSWORD_HASH:
     DASHBOARD_PASSWORD_HASH = generate_password_hash(DASHBOARD_PASSWORD_PLAIN)
 
-AUTH_ENABLED = bool(DASHBOARD_USER and DASHBOARD_PASSWORD_HASH)
+# Fail-closed: dashboard credentials MUST be configured; no auth-off mode
+if not DASHBOARD_USER or not DASHBOARD_PASSWORD_HASH:
+    raise ValueError(
+        "BRAIN_DASHBOARD_USER and BRAIN_DASHBOARD_PASSWORD_HASH (or "
+        "BRAIN_DASHBOARD_PASSWORD) must be set. Dashboard auth is mandatory."
+    )
+AUTH_ENABLED = True
 
 
 def require_login(f):
-    """Decorator to require login if AUTH_ENABLED."""
+    """Decorator to require login (always enforced — fail-closed)."""
     from functools import wraps
 
     @wraps(f)
     def decorated(*args, **kwargs):
-        if AUTH_ENABLED and not session.get("user_id"):
+        if not session.get("user_id"):
             return redirect(url_for("login", next=request.url))
         return f(*args, **kwargs)
     return decorated
@@ -150,8 +156,6 @@ def get_conn():
 @app.route("/login", methods=["GET", "POST"])
 @limiter.limit("5 per minute", methods=["POST"])
 def login():
-    if not AUTH_ENABLED:
-        return redirect(url_for("index"))
     if request.method == "POST":
         username = request.form.get("username", "")
         password = request.form.get("password", "")

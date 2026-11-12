@@ -1,18 +1,26 @@
 import pytest
+import re
 
 PAGES = ["/", "/contacts", "/contacts/add", "/notes", "/notes/add",
          "/search", "/search?q=alice", "/graph", "/graph?q=alice",
          "/import", "/conversations"]
 
 
+def _login(c):
+    """Login helper: post test credentials."""
+    c.post("/login", data={"username": "tester", "password": "rahasia-test-123"})
+
+
 @pytest.mark.parametrize("path", PAGES)
 def test_page_renders(client, path):
     """Regression guard: every page must render (no NameError/500)."""
+    _login(client)
     resp = client.get(path)
     assert resp.status_code == 200, f"GET {path} -> {resp.status_code}"
 
 
 def test_add_contact_roundtrip(client):
+    _login(client)
     resp = client.post("/contacts/add",
                        data={"name": "Alice Tester", "email": "alice@example.com"})
     assert resp.status_code == 302
@@ -20,6 +28,7 @@ def test_add_contact_roundtrip(client):
 
 
 def test_contact_name_is_html_escaped(client):
+    _login(client)
     client.post("/contacts/add", data={"name": "<script>alert(1)</script>"})
     assert b"<script>alert(1)</script>" not in client.get("/contacts").data
 
@@ -56,6 +65,7 @@ def test_login_wrong_password(auth_dashboard):
 def test_api_key_enforced(dashboard, monkeypatch):
     monkeypatch.setattr(dashboard, "BRAIN_API_KEY", "kunci-rahasia")
     c = dashboard.app.test_client()
+    _login(c)
     assert c.get("/api/search?q=x").status_code == 401
     assert c.get("/api/search?q=x", headers={"X-API-Key": "salah"}).status_code == 401
     ok = c.get("/api/search?q=x", headers={"X-API-Key": "kunci-rahasia"})

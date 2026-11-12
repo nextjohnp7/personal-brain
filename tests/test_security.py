@@ -1,15 +1,20 @@
 import re
 
 
+def _login(c):
+    """Login helper: post test credentials."""
+    c.post("/login", data={"username": "tester", "password": "rahasia-test-123"})
+
+
 def test_csrf_rejects_post_without_token(dashboard, monkeypatch):
     monkeypatch.setitem(dashboard.app.config, "WTF_CSRF_ENABLED", True)
     c = dashboard.app.test_client()
     assert c.post("/contacts/add", data={"name": "X"}).status_code == 400
 
 
-def test_csrf_accepts_valid_token(dashboard, monkeypatch):
-    monkeypatch.setitem(dashboard.app.config, "WTF_CSRF_ENABLED", True)
-    c = dashboard.app.test_client()
+def test_csrf_accepts_valid_token(logged_in_client, monkeypatch):
+    monkeypatch.setitem(logged_in_client.application.config, "WTF_CSRF_ENABLED", True)
+    c = logged_in_client
     page = c.get("/contacts/add").get_data(as_text=True)
     token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
     r = c.post("/contacts/add", data={"name": "X", "csrf_token": token})
