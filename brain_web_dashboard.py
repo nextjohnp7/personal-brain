@@ -340,8 +340,7 @@ def search():
         results = global_search(conn, q, limit=20) if q else None
         semantic = semantic_search(conn, q, limit=10) if q else None
         graph = query_knowledge_graph(conn, q, limit=10) if q else None
-        return render_template_string(SEARCH_HTML,
-                                      query=q, results=results,
+        return render_template("search.html", query=q, results=results,
                                       semantic=semantic, graph=graph, page="search")
     finally:
         conn.close()
@@ -376,7 +375,7 @@ def graph():
                 graph["relations"] = all_rels
             finally:
                 conn2.close()
-        return render_template_string(GRAPH_HTML, graph=graph, query=q, page="graph")
+        return render_template("graph.html", graph=graph, query=q, page="graph")
     finally:
         conn.close()
 
@@ -431,7 +430,7 @@ def import_brain():
             conn.close()
         return redirect(url_for("index"))
 
-    return render_template_string(IMPORT_HTML, page="import")
+    return render_template("import.html", page="import")
 
 
 # ---- Conversations ----
@@ -444,7 +443,7 @@ def conversations():
         cur = conn.cursor()
         cur.execute("SELECT * FROM conversations ORDER BY created_at DESC LIMIT 50")
         rows = [dict(r) for r in cur.fetchall()]
-        return render_template_string(CONVERSATIONS_HTML, conversations=rows, page="conversations")
+        return render_template("conversations.html", conversations=rows, page="conversations")
     finally:
         conn.close()
 

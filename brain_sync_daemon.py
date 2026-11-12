@@ -298,31 +298,47 @@ def sync_calendar_once(conn, creds, state):
     updatedMin on first run. Handles pagination via nextPageToken.
     """
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
 
     service = build("calendar", "v3", credentials=creds)
     sync_token = state.get("calendar_sync_token")
 
     stats = {"events": 0, "contacts": 0, "new_events": 0}
+    retried = False
+    page_token = None
 
     try:
-        page_token = None
         while True:
             kwargs = {
                 "calendarId": "primary",
                 "maxResults": 250,
                 "singleEvents": True,
-                "orderBy": "startTime",
                 "pageToken": page_token,
             }
+            # orderBy is incompatible with syncToken per Google Calendar API docs
             if sync_token:
                 kwargs["syncToken"] = sync_token
             else:
                 # First run: sync events updated in last 30 days
+                kwargs["orderBy"] = "startTime"
                 kwargs["updatedMin"] = (
                     datetime.now(timezone.utc) - timedelta(days=30)
                 ).isoformat()
 
-            events_result = service.events().list(**kwargs).execute()
+            try:
+                events_result = service.events().list(**kwargs).execute()
+            except HttpError as e:
+                if e.resp.status == 410 and sync_token and not retried:
+                    # syncToken expired — clear it and do a full resync
+                    logger.warning("Calendar syncToken expired (410 GONE), clearing and resyncing from scratch")
+                    state["calendar_sync_token"] = None
+                    save_state(state)
+                    sync_token = None
+                    retried = True
+                    page_token = None
+                    continue
+                raise
+
             events = events_result.get("items", [])
 
             if not events:
