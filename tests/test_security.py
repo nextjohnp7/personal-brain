@@ -45,3 +45,43 @@ def test_security_headers_present(dashboard):
     assert resp.headers.get("X-Content-Type-Options") == "nosniff"
     assert resp.headers.get("X-Frame-Options") == "DENY"
     assert resp.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
+
+
+# ---------- F-01: Fail-closed enkripsi database ----------
+def test_brain_db_key_required(monkeypatch):
+    """F-01: get_connection() gagal jika BRAIN_DB_KEY tidak di-set."""
+    monkeypatch.delenv("BRAIN_DB_KEY", raising=False)
+    import importlib
+    import src.brain_db as brain_db
+    importlib.reload(brain_db)
+    try:
+        brain_db.get_connection()
+        assert False, "Harus raise ValueError saat BRAIN_DB_KEY tidak di-set"
+    except ValueError as e:
+        assert "BRAIN_DB_KEY" in str(e)
+
+
+# ---------- F-05: SQL table name allowlist ----------
+def test_validate_table_name_rejects_malicious():
+    """F-05: _validate_table_name() tolak nama tabel berbahaya (SQL injection)."""
+    import src.brain_db as brain_db
+    bad_names = [
+        "contacts; DROP TABLE users--",
+        "contacts' OR 1=1--",
+        "contacts\" OR 1=1--",
+        "contacts DROP TABLE users",
+        "../../etc/passwd",
+        "select * from users",
+        "",
+        "123contacts",
+    ]
+    for name in bad_names:
+        try:
+            brain_db._validate_table_name(name)
+            assert False, f"Harus tolak nama tabel: {name!r}"
+        except ValueError:
+            pass
+
+    # Nama valid harus lolos
+    for name in ["contacts", "notes", "knowledge_entries", "_internal"]:
+        assert brain_db._validate_table_name(name) == name
