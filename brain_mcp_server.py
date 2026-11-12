@@ -274,6 +274,8 @@ def brain_add_contact(name: str, email: str = "", phone: str = "", company: str 
     auth_error = _check_mcp_api_key(api_key, scope="write")
     if auth_error:
         return auth_error
+    if os.environ.get("BRAIN_MCP_READ_ONLY", "").lower() in ("1", "true", "yes"):
+        return "MCP server is in read-only mode. Write operations are disabled."
     conn = _conn()
     try:
         cid = upsert_contact(
@@ -309,6 +311,8 @@ def brain_add_relation(source_name: str, target_name: str, relation_type: str, s
     auth_error = _check_mcp_api_key(api_key, scope="write")
     if auth_error:
         return auth_error
+    if os.environ.get("BRAIN_MCP_READ_ONLY", "").lower() in ("1", "true", "yes"):
+        return "MCP server is in read-only mode. Write operations are disabled."
     conn = _conn()
     try:
         src_eid = upsert_entity(conn, name=source_name, entity_type='person', source='mcp')

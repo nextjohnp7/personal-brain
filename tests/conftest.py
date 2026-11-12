@@ -28,6 +28,15 @@ def dashboard(monkeypatch, tmp_path):
     return dash
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limit(dashboard):
+    """Reset rate limiter storage before each test so rate-limit
+    counter from test_login_rate_limited doesn't leak into other tests."""
+    from brain_web_dashboard import limiter
+    limiter.storage.reset()
+    yield
+
+
 @pytest.fixture()
 def client(dashboard):
     return dashboard.app.test_client()
@@ -40,6 +49,7 @@ def auth_dashboard(dashboard, monkeypatch):
     monkeypatch.setattr(dashboard, "DASHBOARD_USER", "tester")
     monkeypatch.setattr(dashboard, "DASHBOARD_PASSWORD_HASH",
                         generate_password_hash("rahasia-test-123"))
+    dashboard.app.config["RATELIMIT_ENABLED"] = False
     return dashboard
 
 

@@ -7,6 +7,7 @@ No server is required.
 import base64
 import json
 import os
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -992,54 +993,43 @@ def _create_tables(conn):
         )
     """)
 
-    # Agent conversation history (untuk belajar seiring waktu)
+    # Agent conversation history
     cur.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_message TEXT,
             agent_response TEXT,
-            context_used TEXT,     -- JSON array of source IDs yang digunakan
+            context_used TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
-    # Free-form knowledge entries (findings, connections between people, ide)
+    # Free-form knowledge entries
     cur.execute("""
         CREATE TABLE IF NOT EXISTS knowledge_entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_type TEXT,       -- 'person_connection', 'idea', 'finding', 'preference'
+            entry_type TEXT,
             title TEXT,
             content TEXT,
-            related_contact_ids TEXT, -- JSON array of contact IDs
+            related_contact_ids TEXT,
             source TEXT,
-            status TEXT DEFAULT 'active',   -- active, corrected, retracted
+            status TEXT DEFAULT 'active',
             corrected_at TEXT,
             corrected_by TEXT,
-            original_content TEXT,
+            original_name TEXT,
+            original_email TEXT,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
-    # Embeddings for semantic search (content chunks with TF-IDF vectors)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS embeddings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_type TEXT,       -- 'contact', 'email', 'note', 'event', 'knowledge'
-            source_id INTEGER,      -- FK to the source table
-            content_chunk TEXT,     -- the text that was embedded
-            embedding_json TEXT,    -- JSON array of TF-IDF floats
-            created_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    # Entities for knowledge graph (deduplicated people, companies, concepts)
+    # Entities for knowledge graph
     cur.execute("""
         CREATE TABLE IF NOT EXISTS entities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            entity_type TEXT,       -- 'person', 'company', 'concept', 'project'
-            source TEXT,            -- 'manual', 'conversation', 'gmail', 'calendar'
+            entity_type TEXT DEFAULT 'person',
+            source TEXT DEFAULT 'manual',
             context_notes TEXT,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
@@ -1050,12 +1040,12 @@ def _create_tables(conn):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS entity_relations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_entity_id INTEGER,   -- FK to entities.id
-            target_entity_id INTEGER,   -- FK to entities.id
-            relation_type TEXT,         -- 'works_at', 'knows', 'met_with', 'mentioned_in'
-            source TEXT,                -- 'conversation', 'email', 'manual'
+            source_entity_id INTEGER,
+            target_entity_id INTEGER,
+            relation_type TEXT,
+            source TEXT DEFAULT 'manual',
             confidence REAL DEFAULT 1.0,
-            status TEXT DEFAULT 'active',   -- active, corrected, retracted
+            status TEXT DEFAULT 'active',
             corrected_at TEXT,
             corrected_by TEXT,
             created_at TEXT DEFAULT (datetime('now')),
@@ -1064,23 +1054,131 @@ def _create_tables(conn):
         )
     """)
 
-    # Provenance entries — source trail for every fact
+    # Provenance entries
     cur.execute("""
         CREATE TABLE IF NOT EXISTS provenance_entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            subject_type TEXT NOT NULL,   -- 'contact', 'knowledge', 'entity_relation'
-            subject_id INTEGER NOT NULL,  -- FK to the subject table
-            source_type TEXT NOT NULL,    -- 'gmail', 'calendar', 'twitter', 'conversation', 'manual'
-            source_detail TEXT,           -- message_id, event_id, tweet_id, conversation_id, etc.
+            subject_type TEXT NOT NULL,
+            subject_id INTEGER NOT NULL,
+            source_type TEXT NOT NULL,
+            source_detail TEXT,
             confidence REAL DEFAULT 1.0,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
+    # Embeddings for semantic search (content chunks with TF-IDF vectors)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS embeddings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT,
+            source_id INTEGER,
+            content_chunk TEXT,
+            embedding_json TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     conn.commit()
+    _ensure_item_label_columns(conn)
     _ensure_provenance_columns(conn)
 
+
+def _ensure_item_label_columns(conn):
+    """Add owner_user_id, provenance_label, injection_risk columns if missing.
+
+    SQLite has no ADD COLUMN IF NOT EXISTS, so we inspect PRAGMA table_info
+    and only add columns that are absent. Safe to run on every connection.
+    """
+    cur = conn.cursor()
+
+    for table in ("contacts", "notes"):
+        cols = {row[1] for row in cur.execute(f"PRAGMA table_info({table})")}
+        if "owner_user_id" not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN owner_user_id INTEGER")
+        if "provenance_label" not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN provenance_label TEXT")
+        if "injection_risk" not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN injection_risk TEXT DEFAULT 'none'")
+    conn.commit()
+
+
+# ----------------------------------------------------------------------
+# Prompt-injection detection + item labeling
+# ----------------------------------------------------------------------
+
+
+_INJECTION_PATTERNS = [
+    r"ignore\s+previous\s+instructions",
+    r"ignore\s+all\s+prior\s+instructions",
+    r"disregard\s+previous\s+instructions",
+    r"system\s*:\s*",
+    r"you\s+are\s+now\s+",
+    r"jailbreak",
+    r"prompt\s*injection",
+    r"override\s+safety",
+    r"bypass\s+filter",
+]
+
+
+def detect_prompt_injection(text):
+    """Deteksi potensi prompt-injection dalam teks input.
+
+    Returns (is_injection: bool, risk_level: str) where risk_level is
+    'none', 'low', 'medium', or 'high'.
+    """
+    if not text:
+        return False, "none"
+    lowered = text.lower()
+    hits = 0
+    for pattern in _INJECTION_PATTERNS:
+        if re.search(pattern, lowered):
+            hits += 1
+    if hits == 0:
+        return False, "none"
+    if hits >= 3:
+        return True, "high"
+    if hits == 2:
+        return True, "medium"
+    return True, "low"
+
+
+def label_item(conn, item_type, item_id, provenance_label=None, injection_risk=None):
+    """Simpan label provenance dan risiko injection pada item.
+
+    item_type: 'contact' atau 'note'
+    """
+    table = "contacts" if item_type == "contact" else "notes"
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE {table} SET provenance_label = ?, injection_risk = ? WHERE id = ?",
+        (provenance_label, injection_risk, item_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ---------- Owner-scoped queries ----------
+
+def get_contacts_by_owner(conn, user_id, limit=100):
+    """Daftar kontak milik user (owner_user_id = user_id)."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM contacts WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?",
+        (user_id, limit),
+    )
+    return cur.fetchall()
+
+
+def get_notes_by_owner(conn, user_id, limit=100):
+    """Daftar note milik user (owner_user_id = user_id)."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM notes WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?",
+        (user_id, limit),
+    )
+    return cur.fetchall()
 
 # =====================================================================
 # Provenance Operations
