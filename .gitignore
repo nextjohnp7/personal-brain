@@ -1,5 +1,22 @@
+# Secrets
 .env
+google_token.json
+
+# Database (main + WAL sidecars + old backups)
 brain.db
+brain.db-wal
+brain.db-shm
 brain.db.enc
+brain.db.enc.bak
+
+# Personal data exports
+brain_export/
+
+# Daemon runtime
+brain_daemon.log
+.brain_daemon_state.json
+
+# Python / tooling
 __pycache__/
 *.pyc
+.pytest_cache/
