@@ -64,14 +64,14 @@ component (e.g. with your shell, direnv, or a process manager).
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `BRAIN_DB_KEY` | Recommended | base64 of 32 bytes. Encrypts `brain.db` with SQLCipher. **If unset, the DB is stored in plaintext.** |
-| `BRAIN_DASHBOARD_USER` / `BRAIN_DASHBOARD_PASSWORD` | Optional | Enable dashboard login (set both) |
-| `BRAIN_DASHBOARD_SECRET` | Optional | Flask session secret. Random per-process key if unset (sessions reset on restart) |
-| `BRAIN_API_KEY` | Optional | Protects web API + export/import endpoints (`X-API-Key` header) |
-| `BRAIN_MCP_API_KEY` | **For HTTP MCP** | MCP access key. The HTTP server refuses to start without it |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | For Gmail/Calendar | Google Cloud OAuth client |
+| `BRAIN_DB_KEY` | **Required** | base64 of 32 bytes. Encrypts `brain.db` with SQLCipher (AES-256 per-page). **Fail-closed**: `get_connection()` raises `ValueError` if unset or empty — there is no plaintext fallback. |
+| `BRAIN_DASHBOARD_USER` / `BRAIN_DASHBOARD_PASSWORD` | **Required** | Dashboard login. Both must be set; auth is enforced on every request (fail-closed). |
+| `BRAIN_DASHBOARD_SECRET` | Optional | Flask session secret. Auto-generated via `secrets.token_hex(32)` if unset (sessions reset on restart). |
+| `BRAIN_API_KEY` | **Required** | Protects web API + `/export` and `/import` endpoints (`X-API-Key` header). Fail-closed — missing key returns 401. |
+| `BRAIN_MCP_API_KEY_READ` / `BRAIN_MCP_API_KEY_WRITE` | **Required for HTTP MCP** | Scope-based MCP access keys. Read-only tools require READ; read-write tools require WRITE (implies READ). Legacy `BRAIN_MCP_API_KEY` acts as both. HTTP server refuses to start without at least one key configured. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | For Gmail/Calendar | Google Cloud OAuth client (optional — only needed for Opsi B sync) |
 | `GOOGLE_TOKEN_FILE` | For daemon | OAuth token file (default `google_token.json`) |
-| `TWITTER_BEARER_TOKEN` | For Twitter/X | API v2 bearer token |
+| `TWITTER_BEARER_TOKEN` | For Twitter/X | API v2 bearer token (optional) |
 | `BRAIN_NOTES_FOLDER` | Optional | Markdown notes folder (default `./Notes`) |
 | `BRAIN_DAEMON_INTERVAL` | Optional | Sync interval in seconds (default 300) |
 | `BRAIN_EMBEDDING_MODEL` | Optional | HuggingFace model id (default `sentence-transformers/all-MiniLM-L6-v2`) |
@@ -174,14 +174,12 @@ as `brain.db.enc.bak` until you are confident. Delete the backup manually later.
 ## Security model
 
 - **At rest**: SQLCipher AES-256 per-page encryption, WAL included. Plaintext never touches disk.
-- **Dashboard**: optional login (werkzeug-hashed password), random session secret, constant-time API key comparison. `/export` and `/import` require login **and** API key when configured.
-- **MCP**: fail-closed HTTP auth; remote access only over your private Tailscale network.
+- **Dashboard**: required login (werkzeug-hashed password), CSRF protection, login rate limiting (5/min), secure session cookies, constant-time API key comparison. `/export` and `/import` require login **and** API key.
+- **MCP**: fail-closed header-based auth (scope keys `BRAIN_MCP_API_KEY_READ` / `BRAIN_MCP_API_KEY_WRITE`), `hmac.compare_digest` timing-safe comparison; remote access only over your private Tailscale network.
 
 **Known limitations (contributions welcome):**
-- No CSRF protection on dashboard forms yet — keep the dashboard on localhost.
-- The MCP API key is passed as a tool parameter, so it can appear in agent transcripts. Prefer `--stdio` locally, and treat your tailnet as trusted.
-- Single-user dashboard auth; no login rate limiting yet.
-- Without `BRAIN_DB_KEY`, the database is plaintext — use full-disk encryption.
+- Multi-user access control (`users` / `item_shares` tables) is experimental — single-user by default.
+- Without `BRAIN_DB_KEY`, the application refuses to start — use full-disk encryption if you cannot set the env var.
 
 ## Development & tests
 
@@ -195,10 +193,8 @@ regression test proving two concurrent connections never lose writes.
 
 ## Roadmap
 
-- [ ] CSRF protection + login rate limiting
-- [ ] MCP auth via HTTP header instead of tool parameter
 - [ ] Remove legacy HTML string constants from the dashboard
-- [ ] Multi-user access control (users/item_shares are experimental)
+- [ ] Multi-user access control (`users`/`item_shares` — experimental, single-user by default)
 
 ## License
 
