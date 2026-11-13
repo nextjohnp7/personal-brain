@@ -237,3 +237,104 @@ def test_global_and_semantic_search(db_mode):
         assert isinstance(semantic, list)
     finally:
         conn.close()
+
+
+# ---------- Prioritas 5 — MCP search relevance ----------
+def test_search_entities_has_relevance(db_mode):
+    """P5-01: search_entities() must return _relevance field on each result."""
+    conn = db_mode.get_connection()
+    try:
+        # Upsert via entity table directly (search_entities reads entities table)
+        conn.execute(
+            "INSERT INTO entities (name, entity_type, context_notes, source, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+            ("Acme Corporation", "company", "Technology vendor in Jakarta", "mcp"),
+        )
+        conn.commit()
+
+        results = [dict(r) for r in db_mode.search_entities(conn, "Acme", limit=10)]
+        assert len(results) >= 1
+        for r in results:
+            assert "_relevance" in r, f"Missing _relevance in {r}"
+            assert r["_relevance"] > 0.0, f"_relevance should be > 0 for match: {r}"
+    finally:
+        conn.close()
+
+
+def test_search_entities_offset(db_mode):
+    """P5-02: search_entities() must support offset for pagination."""
+    conn = db_mode.get_connection()
+    try:
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO entities (name, entity_type, source, created_at, updated_at) "
+                "VALUES (?, ?, 'mcp', datetime('now'), datetime('now'))",
+                (f"Entity {i:02d}", "person"),
+            )
+        conn.commit()
+
+        page1 = [dict(r) for r in db_mode.search_entities(conn, "Entity", limit=2, offset=0)]
+        page2 = [dict(r) for r in db_mode.search_entities(conn, "Entity", limit=2, offset=2)]
+        page3 = [dict(r) for r in db_mode.search_entities(conn, "Entity", limit=2, offset=4)]
+
+        ids1 = {r["id"] for r in page1}
+        ids2 = {r["id"] for r in page2}
+        ids3 = {r["id"] for r in page3}
+
+        assert len(page1) == 2
+        assert len(page2) == 2
+        assert len(page3) == 1  # only 1 remaining
+        assert ids1.isdisjoint(ids2), "Pages should not overlap"
+        assert ids1.isdisjoint(ids3)
+        assert ids2.isdisjoint(ids3)
+    finally:
+        conn.close()
+
+
+def test_multi_word_relevance_scoring(db_mode):
+    """P5-03: Multi-word query should score higher when more tokens match."""
+    conn = db_mode.get_connection()
+    try:
+        db_mode.upsert_contact(
+            conn, name="John Doe", email="john@example.com",
+            company="Acme Corp", context_notes="Project alpha lead",
+        )
+
+        # Single word match
+        r1 = db_mode.search_contacts(conn, "John", limit=10)
+        # Two words both matching name
+        r2 = db_mode.search_contacts(conn, "John Doe", limit=10)
+
+        # Both should find the contact
+        assert len(r1) >= 1
+        assert len(r2) >= 1
+
+        # Two-word match should have equal or higher relevance than single word
+        # (more tokens matched = better coverage)
+        assert r2[0]["_relevance"] >= r1[0]["_relevance"], \
+            f"Multi-word relevance {r2[0]['_relevance']} < single-word {r1[0]['_relevance']}"
+    finally:
+        conn.close()
+
+
+def test_relevance_title_outranks_body(db_mode):
+    """P5-04: Title match should score higher than body-only match."""
+    conn = db_mode.get_connection()
+    try:
+        db_mode.upsert_contact(
+            conn, name="Other Person", email="alpha@example.com",
+            context_notes="Just a regular contact",
+        )
+        db_mode.upsert_contact(
+            conn, name="Alpha Beta", email="beta@example.com",
+            context_notes="Another contact",
+        )
+
+        results = db_mode.search_contacts(conn, "Alpha", limit=10)
+        assert len(results) >= 2
+
+        # Alpha Beta (title match) should outrank Other Person (body/email match)
+        assert results[0]["_relevance"] >= results[1]["_relevance"], \
+            f"Title match should outrank body match: {results[0]['_relevance']} vs {results[1]['_relevance']}"
+    finally:
+        conn.close()

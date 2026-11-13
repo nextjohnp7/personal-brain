@@ -164,55 +164,113 @@ def brain_search(query: str, limit: int = 10, offset: int = 0, api_key: str = ""
         events = get_upcoming_events(conn, limit=limit * 2, offset=0, query=query)
         notes = search_notes(conn, query, limit=limit * 2, offset=0)
         knowledge = search_knowledge(conn, query, limit=limit * 2, offset=0)
+        entities = search_entities(conn, query, limit=limit * 2, offset=0)
         semantic = semantic_search(conn, query, limit=limit * 2)
-        graph = query_knowledge_graph(conn, query, limit)
 
         # Build a unified, relevance-ranked result list across all sources.
+        # Source weights: contacts and knowledge are most relevant to a person,
+        # semantic matches are weighted lower (meaning-based, not exact).
+        SOURCE_WEIGHT = {
+            'contact': 1.0,
+            'knowledge': 0.95,
+            'entity': 0.9,
+            'note': 0.85,
+            'email': 0.8,
+            'calendar': 0.75,
+            'semantic': 0.6,
+        }
+
         ranked = []
+        seen = set()  # deduplicate by (source, id)
+
         for c in contacts:
+            key = ('contact', c.get('id'))
+            if key in seen:
+                continue
+            seen.add(key)
             ranked.append({
                 'source': 'contact',
-                'relevance': c.get('_relevance', 0.0),
+                'id': c.get('id'),
+                'relevance': c.get('_relevance', 0.0) * SOURCE_WEIGHT['contact'],
                 'title': c.get('name', '(no name)'),
                 'subtitle': c.get('email', 'no email'),
                 'detail': f"Company: {c.get('company', '-')} | Role: {c.get('role', '-')}",
             })
         for e in emails:
+            key = ('email', e.get('message_id') or e.get('id'))
+            if key in seen:
+                continue
+            seen.add(key)
             ranked.append({
                 'source': 'email',
-                'relevance': e.get('_relevance', 0.0),
+                'id': e.get('id'),
+                'relevance': e.get('_relevance', 0.0) * SOURCE_WEIGHT['email'],
                 'title': e.get('subject', '(no subject)'),
                 'subtitle': f"{e.get('sender', '')} → {e.get('recipient', '')}",
                 'detail': e.get('received_at', ''),
             })
         for ev in events:
+            key = ('calendar', ev.get('event_id') or ev.get('id'))
+            if key in seen:
+                continue
+            seen.add(key)
             ranked.append({
                 'source': 'calendar',
-                'relevance': ev.get('_relevance', 0.0),
+                'id': ev.get('id'),
+                'relevance': ev.get('_relevance', 0.0) * SOURCE_WEIGHT['calendar'],
                 'title': ev.get('title', '(no title)'),
                 'subtitle': ev.get('start_time', ''),
                 'detail': ev.get('location', ''),
             })
         for n in notes:
+            key = ('note', n.get('id'))
+            if key in seen:
+                continue
+            seen.add(key)
             ranked.append({
                 'source': 'note',
-                'relevance': n.get('_relevance', 0.0),
+                'id': n.get('id'),
+                'relevance': n.get('_relevance', 0.0) * SOURCE_WEIGHT['note'],
                 'title': n.get('title', '(no title)'),
                 'subtitle': n.get('filename', ''),
                 'detail': (n.get('content', '') or '')[:120],
             })
         for k in knowledge:
+            key = ('knowledge', k.get('id'))
+            if key in seen:
+                continue
+            seen.add(key)
             ranked.append({
                 'source': 'knowledge',
-                'relevance': k.get('_relevance', 0.0),
+                'id': k.get('id'),
+                'relevance': k.get('_relevance', 0.0) * SOURCE_WEIGHT['knowledge'],
                 'title': k.get('title', '(no title)'),
                 'subtitle': k.get('entry_type', ''),
                 'detail': (k.get('content', '') or '')[:120],
             })
+        for ent in entities:
+            key = ('entity', ent.get('id'))
+            if key in seen:
+                continue
+            seen.add(key)
+            ranked.append({
+                'source': 'entity',
+                'id': ent.get('id'),
+                'relevance': ent.get('_relevance', 0.0) * SOURCE_WEIGHT['entity'],
+                'title': ent.get('name', '(no name)'),
+                'subtitle': ent.get('entity_type', ''),
+                'detail': (ent.get('context_notes', '') or '')[:120],
+            })
         for s in semantic:
+            key = ('semantic', f"{s.get('source_type')}:{s.get('source_id')}")
+            if key in seen:
+                continue
+            seen.add(key)
+            # Normalize semantic similarity (0-1) to same scale as keyword relevance
             ranked.append({
                 'source': 'semantic',
-                'relevance': s.get('similarity', 0.0),
+                'id': s.get('id'),
+                'relevance': s.get('similarity', 0.0) * SOURCE_WEIGHT['semantic'],
                 'title': f"[{s.get('source_type', '')}] semantic match",
                 'subtitle': s.get('source_id', ''),
                 'detail': (s.get('content_chunk', '') or '')[:150],
@@ -240,9 +298,10 @@ def brain_search(query: str, limit: int = 10, offset: int = 0, api_key: str = ""
             'calendar': 'Calendar Events',
             'note': 'Notes',
             'knowledge': 'Knowledge Entries',
+            'entity': 'Entities',
             'semantic': 'Semantic Matches',
         }
-        for src in ('contact', 'email', 'calendar', 'note', 'knowledge', 'semantic'):
+        for src in ('contact', 'knowledge', 'entity', 'note', 'email', 'calendar', 'semantic'):
             items = by_source.get(src, [])
             if not items:
                 continue

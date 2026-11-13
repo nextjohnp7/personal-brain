@@ -25,26 +25,60 @@ def _relevance_score(row: dict, query: str, title_fields: tuple, body_fields: tu
 
     Title/name field matches score higher than body/content field matches.
     Exact match scores higher than substring match.
+    Multi-word queries: each token must match somewhere for full score;
+    partial token coverage reduces score proportionally.
     """
     q = query.strip().lower()
     if not q:
         return 0.0
 
+    # Tokenize query for multi-word matching
+    tokens = [t for t in q.split() if t]
+    if not tokens:
+        return 0.0
+
     score = 0.0
+    all_fields = title_fields + body_fields
+
+    # Score each field: best token match wins for that field
     for field in title_fields:
         val = str(row.get(field, '') or '').lower()
-        if q == val:
-            score += 1.0  # exact title match
-        elif q in val:
-            score += 0.7  # title substring match
-        elif val.startswith(q):
-            score += 0.5  # title starts with query
+        field_best = 0.0
+        for token in tokens:
+            if token == val:
+                field_best = max(field_best, 1.0)   # exact title match
+            elif token in val:
+                field_best = max(field_best, 0.7)   # title substring match
+            elif val.startswith(token):
+                field_best = max(field_best, 0.5)   # title starts with token
+        score += field_best
+
     for field in body_fields:
         val = str(row.get(field, '') or '').lower()
-        if q == val:
-            score += 0.5  # exact body match
-        elif q in val:
-            score += 0.3  # body substring match
+        field_best = 0.0
+        for token in tokens:
+            if token == val:
+                field_best = max(field_best, 0.5)   # exact body match
+            elif token in val:
+                field_best = max(field_best, 0.3)   # body substring match
+        score += field_best
+
+    # Token coverage: fraction of query tokens that matched at least one field
+    tokens_matched = 0
+    for token in tokens:
+        token_matched = False
+        for field in all_fields:
+            val = str(row.get(field, '') or '').lower()
+            if token == val or token in val or val.startswith(token):
+                token_matched = True
+                break
+        if token_matched:
+            tokens_matched += 1
+
+    token_coverage = tokens_matched / len(tokens)
+    # Base score scaled by coverage: 0.3 floor + 0.7 * coverage
+    score = score * (0.3 + 0.7 * token_coverage)
+
     return min(score, 1.0)
 
 # Allowlist of characters permitted in table names (defense-in-depth for
@@ -750,17 +784,33 @@ def get_entity(conn, entity_id):
     return cur.fetchone()
 
 
-def search_entities(conn, query, limit=20):
-    """Search entities by name or context notes."""
+def search_entities(conn, query, limit=20, offset=0):
+    """Search entities by name or context notes.
+
+    Results are ranked by relevance (name match > context_notes match).
+    Returns list of sqlite3.Row with an added ``_relevance`` key.
+    """
     cur = conn.cursor()
     like = f"%{query}%"
     cur.execute("""
         SELECT * FROM entities
         WHERE name LIKE ? OR context_notes LIKE ?
         ORDER BY name
-        LIMIT ?
-    """, (like, like, limit))
-    return cur.fetchall()
+        LIMIT ? OFFSET ?
+    """, (like, like, limit, offset))
+    rows = cur.fetchall()
+    # Attach relevance score and sort by it (descending)
+    scored = []
+    for r in rows:
+        d = dict(r)
+        d['_relevance'] = _relevance_score(
+            d, query,
+            title_fields=('name',),
+            body_fields=('context_notes',),
+        )
+        scored.append(d)
+    scored.sort(key=lambda x: x['_relevance'], reverse=True)
+    return scored
 
 
 # =====================================================================
