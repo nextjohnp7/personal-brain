@@ -476,9 +476,9 @@ def sync_calendar_once(conn, creds, state):
 
     service = build("calendar", "v3", credentials=creds)
     sync_token = state.get("calendar_sync_token")
+    page_token = state.get("calendar_page_token")  # Resume from interrupted page
 
     stats = {"events": 0, "contacts": 0, "new_events": 0}
-    page_token = None
 
     mark_sync_started(state, "calendar")
     try:
@@ -508,6 +508,7 @@ def sync_calendar_once(conn, creds, state):
                         "Calendar syncToken expired (410 GONE), clearing and resyncing from scratch"
                     )
                     state["calendar_sync_token"] = None
+                    state.pop("calendar_page_token", None)
                     save_state(state)
                     sync_token = None
                     page_token = None
@@ -587,9 +588,12 @@ def sync_calendar_once(conn, creds, state):
             if not page_token:
                 break
 
-            # Save state after each page so that if the process crashes
-            # mid-pagination, already-processed events are not lost and
-            # pagination can continue from the next page
+            # Save state after each page AND persist pageToken so that if the
+            # process crashes mid-pagination, the next run resumes from this
+            # page instead of restarting from page 1. Upsert operations make
+            # re-processing safe (no data loss), but pageToken persistence
+            # avoids redundant API calls.
+            state["calendar_page_token"] = page_token
             save_state(state)
 
         # Save syncToken for next incremental sync
@@ -598,6 +602,10 @@ def sync_calendar_once(conn, creds, state):
             state["calendar_sync_token"] = next_sync_token
         else:
             state["calendar_last_sync"] = datetime.now(timezone.utc).isoformat()
+
+        # Page fully consumed — clear the pageToken so next cycle starts fresh
+        state.pop("calendar_page_token", None)
+        save_state(state)
 
         mark_sync_finished(state)
         logger.info(

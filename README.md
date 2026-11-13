@@ -33,13 +33,12 @@ personal-brain/
 ├── templates/                   # Jinja2 templates for the dashboard
 ├── tests/                       # Smoke tests + concurrency regression tests
 ├── Notes/                       # Your markdown notes (configure BRAIN_NOTES_FOLDER)
-├── brain.db                     # Encrypted database (created on first run)
+├── brain.db.enc                  # Encrypted database (created on first run)
 ├── brain_web_dashboard.py       # Flask web GUI (default http://127.0.0.1:5000)
 ├── brain_mcp_server.py          # MCP server (stdio / HTTP via Tailscale)
 ├── brain_sync_daemon.py         # Background sync (notes + Gmail + Calendar)
 ├── brain_voice.py               # Caller detection + contact context for voice
 ├── manage_brain.py              # Interactive local CLI (no Google/Twitter needed)
-├── migrate_to_sqlcipher.py      # One-time migration from the old Fernet format
 ├── requirements.txt
 └── .env.example
 ```

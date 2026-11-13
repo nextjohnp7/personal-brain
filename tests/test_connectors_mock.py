@@ -159,6 +159,7 @@ class FakeEventsResource:
 
     def list(self, **kwargs):
         self._users._events_calls += 1
+        self._users._captured_page_token = kwargs.get("pageToken", None)
         if self._list is None:
             self._list = FakeEventsList(self._users._events_pages, self._users._http_error_410)
         return self._list
@@ -340,3 +341,112 @@ def test_calendar_sync_pagination(db_mode, monkeypatch):
 
     assert stats["events"] >= 1
     assert state.get("calendar_sync_token") is not None
+
+
+# ---------- Prioritas 6 — Calendar pagination recovery ----------
+def test_calendar_page_token_persistence(db_mode, monkeypatch):
+    """P6-01: calendar_page_token is saved in state after each page and
+    used to resume on next run. Upsert makes re-processing safe, but
+    pageToken persistence avoids redundant API calls on recovery."""
+    import googleapiclient.discovery
+    import brain_sync_daemon as bsd
+
+    pages = [
+        {
+            "items": [
+                {
+                    "id": "evt1",
+                    "summary": "Event 1",
+                    "start": {"dateTime": "2026-10-21T10:00:00Z"},
+                    "end": {"dateTime": "2026-10-21T11:00:00Z"},
+                    "attendees": [{"email": "attendee@example.com"}],
+                    "status": "confirmed",
+                }
+            ],
+            "nextPageToken": "page2",
+        },
+        {
+            "items": [],
+            "nextSyncToken": "final_sync_token",
+        },
+    ]
+    fake_build._calendar_pages = pages
+    fake_build._calendar_410 = False
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")
+
+    conn = db_mode.get_connection()
+    try:
+        # Simulate resume from interrupted sync: state has saved pageToken
+        state = {"calendar_page_token": "page2"}
+        stats = bsd.sync_calendar_once(conn, "dummy-creds", state)
+    finally:
+        conn.close()
+
+    # Mock should have received the saved pageToken
+    captured = fake_build._last_service._users._captured_page_token
+    assert captured == "page2", f"Expected pageToken 'page2', got {captured!r}"
+
+    # Should have processed page 2 and saved final syncToken
+    assert state.get("calendar_sync_token") == "final_sync_token"
+    # Page token cleared after full pagination
+    assert state.get("calendar_page_token") is None
+    assert stats["events"] >= 1
+
+
+def test_calendar_page_token_saved_during_pagination(db_mode, monkeypatch):
+    """P6-02: calendar_page_token is saved in state after each page."""
+    import googleapiclient.discovery
+    import brain_sync_daemon as bsd
+
+    # Monkeypatch save_state to capture state after each page
+    saved_states = []
+    original_save_state = bsd.save_state
+
+    def capture_save_state(state):
+        saved_states.append(dict(state))
+        original_save_state(state)
+
+    monkeypatch.setattr(bsd, "save_state", capture_save_state)
+
+    pages = [
+        {
+            "items": [
+                {
+                    "id": "evt1",
+                    "summary": "Event 1",
+                    "start": {"dateTime": "2026-10-21T10:00:00Z"},
+                    "end": {"dateTime": "2026-10-21T11:00:00Z"},
+                    "attendees": [{"email": "attendee@example.com"}],
+                    "status": "confirmed",
+                }
+            ],
+            "nextPageToken": "page2",
+        },
+        {
+            "items": [],
+            "nextSyncToken": "final_sync_token",
+        },
+    ]
+    fake_build._calendar_pages = pages
+    fake_build._calendar_410 = False
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")
+
+    conn = db_mode.get_connection()
+    try:
+        state = {}
+        stats = bsd.sync_calendar_once(conn, "dummy-creds", state)
+    finally:
+        conn.close()
+
+    # At least one saved state should contain calendar_page_token
+    page_token_states = [
+        s for s in saved_states if s.get("calendar_page_token") == "page2"
+    ]
+    assert len(page_token_states) >= 1, \
+        f"calendar_page_token 'page2' not found in saved states: {saved_states}"
+    # Final state should have pageToken cleared
+    assert state.get("calendar_page_token") is None
