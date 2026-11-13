@@ -34,6 +34,9 @@ from brain_db import (
     record_failed_gmail_message,
     get_failed_gmail_messages,
     clear_failed_gmail_message,
+    record_failed_calendar_event,
+    get_failed_calendar_events,
+    clear_failed_calendar_event,
 )
 from brain_connectors import (
     _extract_email,
@@ -277,7 +280,6 @@ def sync_gmail_once(conn, creds, state):
                 _process_gmail_message(conn, service, msg_data, stats)
                 clear_failed_gmail_message(conn, msg_id)
                 logger.info(f"Gmail retry success: {msg_id}")
-                stats["new_messages"] = stats.get("new_messages", 0) + 1
             except Exception as e:
                 logger.warning(
                     f"Gmail retry still failed: {msg_id} — {e}"
@@ -463,6 +465,69 @@ def _sync_gmail_timestamp_fallback(conn, service, state, last_sync, stats):
 # Google Calendar sync (incremental by last sync timestamp)
 # =====================================================================
 
+def _process_calendar_event(conn, service, event, stats):
+    """Process a single Calendar event: upsert contact and event record.
+
+    Handles cancelled events as deletions. Increments stats counters.
+    Raises on failure so caller can record to calendar_failed_events.
+    """
+    # Handle deleted events (status == "cancelled")
+    if event.get("status") == "cancelled":
+        event_id = event.get("id", "")
+        if event_id:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM calendar_events WHERE event_id = ?",
+                (event_id,),
+            )
+            conn.commit()
+        return
+
+    event_id = event.get("id", "")
+    title = event.get("summary", "(No Title)")
+    description = event.get("description", "")
+    start = event.get("start", {}).get(
+        "dateTime", event.get("start", {}).get("date", "")
+    )
+    end = event.get("end", {}).get(
+        "dateTime", event.get("end", {}).get("date", "")
+    )
+    location = event.get("location", "")
+    attendees = event.get("attendees", [])
+    attendee_emails = [
+        a.get("email", "")
+        for a in attendees
+        if a.get("email")
+    ]
+
+    # Link to contact (organizer or first attendee)
+    contact_id = None
+    organizer = event.get("organizer", {})
+    organizer_email = organizer.get("email", "")
+    organizer_name = organizer.get("displayName", "")
+
+    if organizer_email:
+        contact_id = upsert_contact(
+            conn, name=organizer_name or organizer_email,
+            email=organizer_email, source="calendar"
+        )
+        stats["contacts"] += 1
+    elif attendee_emails:
+        contact_id = upsert_contact(
+            conn, name=attendee_emails[0],
+            email=attendee_emails[0], source="calendar"
+        )
+
+    upsert_calendar_event(
+        conn, event_id=event_id, title=title,
+        description=description, start_time=start, end_time=end,
+        location=location, attendees=attendee_emails,
+        contact_id=contact_id,
+    )
+    stats["events"] += 1
+    stats["new_events"] += 1
+
+
 def sync_calendar_once(conn, creds, state):
     """Synchronize calendar events from Google Calendar.
 
@@ -480,6 +545,31 @@ def sync_calendar_once(conn, creds, state):
 
     stats = {"events": 0, "contacts": 0, "new_events": 0}
 
+    # ------------------- Retry previously failed calendar events ------------
+    failed = get_failed_calendar_events(conn)
+    for entry in failed:
+        event_id = entry["event_id"]
+        # Skip events that have exceeded max retries
+        if entry.get("retry_count", 0) >= 5:
+            logger.warning(
+                f"Calendar event {event_id} exceeded max retries, skipping"
+            )
+            continue
+        try:
+            event = (
+                service.events()
+                .get(calendarId="primary", eventId=event_id)
+                .execute()
+            )
+            _process_calendar_event(conn, service, event, stats)
+            clear_failed_calendar_event(conn, event_id)
+            logger.info(f"Calendar retry success: {event_id}")
+        except Exception as e:
+            logger.warning(
+                f"Calendar retry still failed: {event_id} — {e}"
+            )
+            record_failed_calendar_event(conn, event_id, str(e))
+
     mark_sync_started(state, "calendar")
     try:
         while True:
@@ -493,10 +583,16 @@ def sync_calendar_once(conn, creds, state):
             if sync_token:
                 kwargs["syncToken"] = sync_token
             else:
-                # First run: sync events updated in last 30 days
+                # First run: sync events in a wide time window so future
+                # events created long ago are not missed. Using updatedMin
+                # alone would skip events created >30 days ago that haven't
+                # been updated since (e.g. a conference 6 months out).
                 kwargs["orderBy"] = "startTime"
-                kwargs["updatedMin"] = (
-                    datetime.now(timezone.utc) - timedelta(days=30)
+                kwargs["timeMin"] = (
+                    datetime.now(timezone.utc) - timedelta(days=365)
+                ).isoformat()
+                kwargs["timeMax"] = (
+                    datetime.now(timezone.utc) + timedelta(days=730)
                 ).isoformat()
 
             try:
@@ -522,66 +618,13 @@ def sync_calendar_once(conn, creds, state):
 
             for event in events:
                 try:
-                    # Handle deleted events (status == "cancelled")
-                    if event.get("status") == "cancelled":
-                        event_id = event.get("id", "")
-                        if event_id:
-                            cur = conn.cursor()
-                            cur.execute(
-                                "DELETE FROM calendar_events WHERE event_id = ?",
-                                (event_id,),
-                            )
-                            conn.commit()
-                        continue
-
-                    event_id = event.get("id", "")
-                    title = event.get("summary", "(No Title)")
-                    description = event.get("description", "")
-                    start = event.get("start", {}).get(
-                        "dateTime", event.get("start", {}).get("date", "")
-                    )
-                    end = event.get("end", {}).get(
-                        "dateTime", event.get("end", {}).get("date", "")
-                    )
-                    location = event.get("location", "")
-                    attendees = event.get("attendees", [])
-                    attendee_emails = [
-                        a.get("email", "")
-                        for a in attendees
-                        if a.get("email")
-                    ]
-
-                    # Link to contact (organizer or first attendee)
-                    contact_id = None
-                    organizer = event.get("organizer", {})
-                    organizer_email = organizer.get("email", "")
-                    organizer_name = organizer.get("displayName", "")
-
-                    if organizer_email:
-                        contact_id = upsert_contact(
-                            conn, name=organizer_name or organizer_email,
-                            email=organizer_email, source="calendar"
-                        )
-                        stats["contacts"] += 1
-                    elif attendee_emails:
-                        contact_id = upsert_contact(
-                            conn, name=attendee_emails[0],
-                            email=attendee_emails[0], source="calendar"
-                        )
-
-                    upsert_calendar_event(
-                        conn, event_id=event_id, title=title,
-                        description=description, start_time=start, end_time=end,
-                        location=location, attendees=attendee_emails,
-                        contact_id=contact_id,
-                    )
-                    stats["events"] += 1
-                    stats["new_events"] += 1
-
+                    _process_calendar_event(conn, service, event, stats)
                 except Exception as e:
+                    event_id = event.get("id", "")
                     logger.error(
-                        f"Failed to process calendar event {event.get('id')}: {e}"
+                        f"Failed to process calendar event {event_id}: {e}"
                     )
+                    record_failed_calendar_event(conn, event_id, str(e))
 
             # Pagination
             page_token = events_result.get("nextPageToken")

@@ -32,6 +32,14 @@ class FakeMessageGet:
         return self._msg_data
 
 
+class FakeEventGet:
+    def __init__(self, event_data):
+        self._event_data = event_data
+
+    def execute(self):
+        return self._event_data
+
+
 class FakeMessagesList:
     def __init__(self, pages):
         self._pages = pages
@@ -163,6 +171,10 @@ class FakeEventsResource:
         if self._list is None:
             self._list = FakeEventsList(self._users._events_pages, self._users._http_error_410)
         return self._list
+
+    def get(self, **kwargs):
+        event_id = kwargs.get("eventId", kwargs.get("id", "unknown"))
+        return FakeEventGet({"id": event_id, "summary": f"Event {event_id}"})
 
 
 class FakeService:
@@ -450,3 +462,254 @@ def test_calendar_page_token_saved_during_pagination(db_mode, monkeypatch):
         f"calendar_page_token 'page2' not found in saved states: {saved_states}"
     # Final state should have pageToken cleared
     assert state.get("calendar_page_token") is None
+
+
+# ---------- Prioritas 0 — Calendar failed-event retry ----------
+def test_calendar_failed_event_recorded_and_retried(db_mode, monkeypatch):
+    """P0-01: Calendar event yang gagal diproses dicatat ke
+    calendar_failed_events dan di-retry pada run berikutnya."""
+    import googleapiclient.discovery
+    import brain_sync_daemon as bsd
+    import src.brain_db as brain_db
+    from brain_db import get_failed_calendar_events, clear_failed_calendar_event
+
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")
+
+    # Force upsert_calendar_event to raise so event is recorded as failed
+    original_upsert = brain_db.upsert_calendar_event
+    call_count = {"n": 0}
+
+    def failing_upsert(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated processing failure")
+        return original_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(bsd, "upsert_calendar_event", failing_upsert)
+
+    pages = [
+        {
+            "items": [
+                {
+                    "id": "evt-fail-1",
+                    "summary": "Failing Event",
+                    "start": {"dateTime": "2026-10-21T10:00:00Z"},
+                    "end": {"dateTime": "2026-10-21T11:00:00Z"},
+                    "status": "confirmed",
+                }
+            ],
+            "nextSyncToken": "sync_token_1",
+        },
+    ]
+    fake_build._calendar_pages = pages
+    fake_build._calendar_410 = False
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
+
+    conn = db_mode.get_connection()
+    try:
+        state = {}
+        stats = bsd.sync_calendar_once(conn, "dummy-creds", state)
+
+        # Event should be in failed table (queried BEFORE close)
+        failed = get_failed_calendar_events(conn)
+        assert len(failed) >= 1, f"Expected failed event recorded, got {failed}"
+        assert failed[0]["event_id"] == "evt-fail-1"
+        assert failed[0]["retry_count"] >= 1
+    finally:
+        conn.close()
+
+
+def test_calendar_failed_event_retry_succeeds(db_mode, monkeypatch):
+    """P0-02: Calendar event yang gagal sebelumnya berhasil di-retry
+    dan dihapus dari failed table."""
+    import googleapiclient.discovery
+    import brain_sync_daemon as bsd
+    import src.brain_db as brain_db
+    from brain_db import (
+        get_failed_calendar_events,
+        record_failed_calendar_event,
+    )
+
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")
+
+    conn = db_mode.get_connection()
+    try:
+        record_failed_calendar_event(conn, "evt-retry-1", "transient error")
+    finally:
+        conn.close()
+
+    # Mock: events().get() returns the event successfully, upsert works
+    pages = [{"items": [], "nextSyncToken": "sync_token_2"}]
+    fake_build._calendar_pages = pages
+    fake_build._calendar_410 = False
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
+
+    conn = db_mode.get_connection()
+    try:
+        state = {}
+        stats = bsd.sync_calendar_once(conn, "dummy-creds", state)
+
+        # Failed event should be cleared after successful retry
+        failed = get_failed_calendar_events(conn)
+        retry_ids = [f["event_id"] for f in failed]
+        assert "evt-retry-1" not in retry_ids, \
+            f"Failed event should be cleared after retry, still in {retry_ids}"
+    finally:
+        conn.close()
+
+
+def test_calendar_failed_event_max_retry(db_mode, monkeypatch):
+    """P2-01: Calendar event yang melebihi max retry (5) dilewati,
+    tidak dicoba ulang selamanya."""
+    import googleapiclient.discovery
+    import brain_sync_daemon as bsd
+    import src.brain_db as brain_db
+    from brain_db import (
+        record_failed_calendar_event,
+        get_failed_calendar_events,
+    )
+
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")
+
+    conn = db_mode.get_connection()
+    try:
+        record_failed_calendar_event(conn, "evt-max-retry", "persistent error")
+        conn.execute(
+            "UPDATE calendar_failed_events SET retry_count = 5 WHERE event_id = ?",
+            ("evt-max-retry",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    pages = [{"items": [], "nextSyncToken": "sync_token_3"}]
+    fake_build._calendar_pages = pages
+    fake_build._calendar_410 = False
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
+
+    conn = db_mode.get_connection()
+    try:
+        state = {}
+        stats = bsd.sync_calendar_once(conn, "dummy-creds", state)
+
+        # Event should still be in failed table (skipped, not retried)
+        failed = get_failed_calendar_events(conn)
+        retry_ids = [f["event_id"] for f in failed]
+        assert "evt-max-retry" in retry_ids, \
+            f"Event at max retry should remain in failed table, got {retry_ids}"
+    finally:
+        conn.close()
+
+
+# ---------- Prioritas 1 — Gmail retry double-count ----------
+def test_gmail_retry_no_double_count(db_mode, monkeypatch):
+    """P1-01: Gmail retry yang berhasil tidak boleh menaikkan
+    new_messages dua kali (_process_gmail_message sudah menambahkannya)."""
+    import googleapiclient.discovery
+    import brain_sync_daemon as bsd
+    import src.brain_db as brain_db
+    from brain_db import record_failed_gmail_message
+
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")
+
+    conn = db_mode.get_connection()
+    try:
+        record_failed_gmail_message(conn, "msg-retry-1", "transient error")
+    finally:
+        conn.close()
+
+    pages = [{"messages": [], "nextPageToken": None}]
+    fake_build._gmail_pages = pages
+    fake_build._gmail_410 = False
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", fake_build)
+
+    conn = db_mode.get_connection()
+    try:
+        state = {"gmail_history_id": "1"}
+        stats = bsd.sync_gmail_once(conn, "dummy-creds", state)
+
+        # new_messages should be exactly 1 (not 2)
+        assert stats["new_messages"] == 1, \
+            f"Expected new_messages=1, got {stats['new_messages']} (double-count bug?)"
+    finally:
+        conn.close()
+
+
+# ---------- Prioritas 1 — Calendar initial sync coverage ----------
+def test_calendar_initial_sync_uses_time_window(db_mode, monkeypatch):
+    """P1-02: Calendar initial sync harus menggunakan timeMin/timeMax
+    (cakupan waktu event), bukan updatedMin 30 hari, agar event masa depan
+    yang dibuat lama tidak terlewat."""
+    import googleapiclient.discovery
+    import brain_sync_daemon as bsd
+
+    monkeypatch.setenv("BRAIN_DB_KEY", "nydE-s2-6NLtiR_lb8dsM_rlGw1wTxMfWPn2YAeKOcA=")
+
+    captured_kwargs = {}
+
+    class CapturingEventsList:
+        def __init__(self, pages, http_error_410=False):
+            self._pages = pages
+            self._index = 0
+
+        def execute(self):
+            page = self._pages[self._index]
+            self._index += 1
+            return page
+
+    class CapturingEventsResource:
+        def __init__(self, users):
+            self._users = users
+
+        def list(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return CapturingEventsList([{"items": [], "nextSyncToken": "tok"}])
+
+        def get(self, **kwargs):
+            return FakeEventGet({"id": kwargs.get("eventId", "x")})
+
+    class CapturingUsers:
+        def __init__(self):
+            self._events_resource = CapturingEventsResource(self)
+
+        def events(self):
+            return self._events_resource
+
+        def getProfile(self, **kwargs):
+            return FakeProfileGet({"historyId": "1"})
+
+    class CapturingService:
+        def __init__(self):
+            self._users = CapturingUsers()
+
+        def users(self):
+            return self._users
+
+        def events(self):
+            return self._users.events()
+
+    def capturing_build(api_name, version, credentials=None, **kwargs):
+        service = CapturingService()
+        fake_build._last_service = service
+        return service
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", capturing_build)
+
+    conn = db_mode.get_connection()
+    try:
+        state = {}
+        stats = bsd.sync_calendar_once(conn, "dummy-creds", state)
+
+        # Initial sync should use timeMin/timeMax, NOT updatedMin
+        assert "timeMin" in captured_kwargs, \
+            f"Expected timeMin in initial sync kwargs, got {list(captured_kwargs.keys())}"
+        assert "timeMax" in captured_kwargs, \
+            f"Expected timeMax in initial sync kwargs, got {list(captured_kwargs.keys())}"
+        assert "updatedMin" not in captured_kwargs, \
+            f"updatedMin should NOT be used for initial sync, got {captured_kwargs}"
+    finally:
+        conn.close()

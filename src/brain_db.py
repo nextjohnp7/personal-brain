@@ -305,6 +305,56 @@ def clear_failed_gmail_message(conn, message_id):
     conn.commit()
 
 
+# ---------- Calendar failed events (mirror of gmail_failed_messages) ----------
+def record_failed_calendar_event(conn, event_id, error_message):
+    """Record a Calendar event that failed processing, for retry on next run.
+
+    Uses INSERT OR REPLACE so retrying the same failed event updates
+    the error message and increments retry_count.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO calendar_failed_events (event_id, error_message, failed_at, retry_count, last_retry_at)
+        VALUES (?, ?, datetime('now'), 1, datetime('now'))
+        ON CONFLICT(event_id) DO UPDATE SET
+            error_message = excluded.error_message,
+            failed_at = datetime('now'),
+            retry_count = retry_count + 1,
+            last_retry_at = datetime('now')
+    """, (event_id, str(error_message)))
+    conn.commit()
+
+
+def get_failed_calendar_events(conn):
+    """Return list of dicts for all Calendar events awaiting retry."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT event_id, error_message, failed_at, retry_count, last_retry_at
+        FROM calendar_failed_events
+        ORDER BY failed_at ASC
+    """)
+    rows = cur.fetchall()
+    return [
+        {
+            "event_id": r[0],
+            "error_message": r[1],
+            "failed_at": r[2],
+            "retry_count": r[3],
+            "last_retry_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+def clear_failed_calendar_event(conn, event_id):
+    """Remove an event from the failed list after successful retry."""
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM calendar_failed_events WHERE event_id = ?", (event_id,)
+    )
+    conn.commit()
+
+
 def search_emails(conn, query, limit=20, offset=0):
     """Search emails by subject, body, sender, or recipient.
 
@@ -642,12 +692,19 @@ def semantic_search(conn, query, limit=10):
 
     Returns list of dicts with source_type, source_id, content_chunk, similarity.
 
+    Only embeddings produced by the currently active model_version are
+    compared — mixing TF-IDF and sentence-transformers vectors would produce
+    meaningless cosine similarity across different embedding spaces.
+
     Performance: fetches a capped batch of recent embeddings from the DB
     (instead of all rows), computes cosine similarity in Python on that
     subset, then returns the top `limit` results. This bounds the O(n)
     Python-side work as the embedding table grows.
     """
+    from brain_embeddings import get_embedding_version
+
     query_vector = embed_text(query)
+    active_version = get_embedding_version()
 
     # Cap the Python-side similarity computation so it stays bounded as the
     # embeddings table grows. Prioritize recent content.
@@ -655,8 +712,8 @@ def semantic_search(conn, query, limit=10):
     cur = conn.cursor()
     cur.execute(
         "SELECT id, source_type, source_id, content_chunk, embedding_json FROM embeddings "
-        "ORDER BY created_at DESC LIMIT ?",
-        (prefetch_limit,),
+        "WHERE model_version = ? ORDER BY created_at DESC LIMIT ?",
+        (active_version, prefetch_limit),
     )
     rows = cur.fetchall()
 
@@ -1321,6 +1378,17 @@ def _create_tables(conn):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gmail_failed_messages (
             message_id TEXT PRIMARY KEY,
+            error_message TEXT,
+            failed_at TEXT DEFAULT (datetime('now')),
+            retry_count INTEGER DEFAULT 0,
+            last_retry_at TEXT
+        )
+    """)
+
+    # Calendar events that failed processing — checkpoint for retry on next run
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS calendar_failed_events (
+            event_id TEXT PRIMARY KEY,
             error_message TEXT,
             failed_at TEXT DEFAULT (datetime('now')),
             retry_count INTEGER DEFAULT 0,

@@ -239,6 +239,69 @@ def test_global_and_semantic_search(db_mode):
         conn.close()
 
 
+# ---------- Prioritas 0 — Embedding version filtering ----------
+def test_semantic_search_filters_by_model_version(db_mode, monkeypatch):
+    """P0-03: semantic_search() harus filter embeddings berdasarkan
+    model_version aktif. Embedding dari model yang berbeda tidak boleh
+    dicampur karena cosine similarity lintas ruang embedding tidak bermakna."""
+    import json
+    import brain_db as brain_db_mod
+    import brain_embeddings
+
+    # Monkeypatch embed_text to return a deterministic vector
+    monkeypatch.setattr(
+        brain_db_mod, "embed_text", lambda text: [1.0, 0.0, 0.0]
+    )
+    # Monkeypatch cosine_similarity to return 1.0 for matching, 0.0 otherwise
+    def fake_cosine(v1, v2):
+        if v1 == v2:
+            return 1.0
+        return 0.0
+    monkeypatch.setattr(brain_db_mod, "_cosine_similarity", fake_cosine)
+
+    conn = db_mode.get_connection()
+    try:
+        # Insert embeddings with two different model versions
+        conn.execute(
+            "INSERT INTO embeddings (source_type, source_id, content_chunk, embedding_json, model_version, created_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+            ("contact", "1", "old tfidf content", json.dumps([1.0, 0.0, 0.0]), "tfidf-v1"),
+        )
+        conn.execute(
+            "INSERT INTO embeddings (source_type, source_id, content_chunk, embedding_json, model_version, created_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+            ("contact", "2", "new sentence-transformers content", json.dumps([0.0, 1.0, 0.0]), "sentence-transformers-v2"),
+        )
+        conn.commit()
+
+        # Monkeypatch get_embedding_version to return the new version
+        monkeypatch.setattr(
+            brain_embeddings, "get_embedding_version",
+            lambda: "sentence-transformers-v2",
+        )
+
+        results = db_mode.semantic_search(conn, "content", limit=10)
+
+        # Should only return the embedding with matching model_version
+        # Vector [1,0,0] vs stored [0,1,0] -> cosine = 0 < 0.1 threshold -> no results
+        assert len(results) == 0, \
+            f"Expected 0 results for mismatched model version, got {len(results)}"
+
+        # Now switch to old version — should return the old content
+        monkeypatch.setattr(
+            brain_embeddings, "get_embedding_version",
+            lambda: "tfidf-v1",
+        )
+
+        results_old = db_mode.semantic_search(conn, "content", limit=10)
+        assert len(results_old) >= 1
+        for r in results_old:
+            assert r["content_chunk"] == "old tfidf content", \
+                f"Expected old model content, got: {r['content_chunk']}"
+    finally:
+        conn.close()
+
+
 # ---------- Prioritas 5 — MCP search relevance ----------
 def test_search_entities_has_relevance(db_mode):
     """P5-01: search_entities() must return _relevance field on each result."""
